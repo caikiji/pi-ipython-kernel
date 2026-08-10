@@ -403,4 +403,65 @@ await test("kernel: two processes share the global layer (SQLite lock)", async (
 	}
 });
 
+// ---------------------------------------------------------- kernel session
+
+const { KernelSession } = await import("../src/kernelSession.ts");
+
+await test("kernel session: concurrent first calls share one process", async () => {
+	const wd = workspace();
+	// Missing manifest: runtime bootstrap fails fast, session falls back
+	// to the system python3 (hermetic, no downloads).
+	const session = new KernelSession({ serverPath, manifestPath: resolve(wd, "no-manifest.json") });
+	try {
+		// First use from parallel callers (one message, several tool calls):
+		// all must resolve to the SAME process. The pre-fix getKernel had a
+		// check-then-act race across the async runtime resolution, spawning
+		// one process per caller and losing all but the last one's state.
+		const [k1, k2, k3] = await Promise.all([session.get(wd), session.get(wd), session.get(wd)]);
+		assert.ok(k1 === k2 && k2 === k3, "all parallel callers share one KernelProcess");
+		// State created through one caller is visible through the others.
+		const created = await k1.execute("shared = 'visible'");
+		assert.equal(created.result.error, "");
+		const read = await k2.execute("shared");
+		assert.match(read.result.output, /visible/, "state set via one caller is visible via another");
+		const again = await session.get(wd);
+		assert.ok(again === k1, "subsequent calls keep the same process");
+	} finally {
+		await session.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
+await test("kernel session: cwd change rebuilds and kills the old kernel", async () => {
+	const wd1 = workspace();
+	const wd2 = workspace();
+	const session = new KernelSession({ serverPath, manifestPath: resolve(wd1, "no-manifest.json") });
+	try {
+		const k1 = await session.get(wd1);
+		await k1.execute("x = 1");
+		const k2 = await session.get(wd2);
+		assert.notEqual(k2, k1, "different cwd -> different process");
+		assert.equal(k1.running, false, "old workspace kernel is killed on rebuild");
+		const r = await k2.execute("x"); // fresh process, no x
+		assert.match(r.result.error, /NameError/);
+	} finally {
+		await session.shutdown();
+		rmSync(wd1, { recursive: true, force: true });
+		rmSync(wd2, { recursive: true, force: true });
+	}
+});
+
+await test("kernel session: fallback warning reported once", async () => {
+	const wd = workspace();
+	const session = new KernelSession({ serverPath, manifestPath: resolve(wd, "no-manifest.json") });
+	try {
+		await session.get(wd);
+		assert.match(session.warningText(), /managed python bootstrap failed/);
+		assert.equal(session.warningText(), "", "warning is shown exactly once");
+	} finally {
+		await session.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
 console.log(`\n${passed} tests passed`);

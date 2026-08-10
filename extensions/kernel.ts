@@ -7,69 +7,26 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { KernelProcess } from "../src/kernelProcess.ts";
+import { KernelSession } from "../src/kernelSession.ts";
 import { formatExecuteResult, formatGet, formatLs, formatPublish, type GetResult, type LsEntry } from "../src/format.ts";
-import { RuntimeManager } from "../src/runtime.ts";
-
 export default function kernelExtension(pi: ExtensionAPI) {
 	// python/server.py and runtime.json sit next to the package, one level
 	// above extensions/.
 	const serverPath = resolve(dirname(fileURLToPath(import.meta.url)), "../python/server.py");
 	const manifestPath = resolve(dirname(fileURLToPath(import.meta.url)), "../python/runtime.json");
 
-	// One process per extension instance (= per pi session). Rebuilt if the
-	// session's cwd changes (different workspace).
-	let kernel: KernelProcess | undefined;
-	let kernelCwd: string | undefined;
+	// One kernel process per extension instance (= per pi session), per
+	// workspace. Rebuilt if the session's cwd changes (different workspace).
+	// get() is race-free: concurrent tool calls resolve to one process.
+	const session = new KernelSession({ serverPath, manifestPath });
 
-	// Managed runtime (uv-bootstrapped Python) resolved once per instance;
-	// undefined = fell back to the system python3.
-	let runtimePython: string | undefined;
-	let runtimeFailure: string | undefined;
-	let fallbackNotified = false;
-	let initNotified = false;
-
-	async function getKernel(cwd: string, onStage?: (s: string) => void): Promise<KernelProcess> {
-		if (!kernel || kernelCwd !== cwd) {
-			void kernel?.killSync();
-			const pythonCmd = await resolveRuntime(onStage);
-			kernel = new KernelProcess({ serverPath, cwd, pythonCmd });
-			kernelCwd = cwd;
-		}
-		return kernel;
-	}
-
-	async function resolveRuntime(onStage?: (s: string) => void): Promise<string | undefined> {
-		if (runtimePython !== undefined || runtimeFailure) return runtimePython;
-		const manager = new RuntimeManager({ manifestPath, onStage });
-		try {
-			runtimePython = await manager.ensure();
-		} catch (err) {
-			runtimeFailure = err instanceof Error ? err.message : String(err);
-			runtimePython = undefined;
-		}
-		return runtimePython;
-	}
-
-	function fallbackWarning(): string {
-		if (!runtimeFailure || fallbackNotified) return "";
-		fallbackNotified = true;
-			return `[runtime] managed python bootstrap failed; using system python3. ${runtimeFailure}\n\n`;
-	}
-
-	function initWarning(proc: KernelProcess): string {
-		const init = proc.initReport;
-		if (!init?.path || initNotified) return "";
-		initNotified = true;
-		if (init.error) {
-			return `[init] ${init.path} failed on startup: ${init.error}\n\n`;
-		}
-		const names = init.registered;
-		return `[init] executed ${init.path} (registered: ${names.join(", ") || "no new names"})\n\n`;
+	function stage(onUpdate?: AgentToolUpdateCallback): (s: string) => void {
+		return (s) => onUpdate?.({ content: [{ type: "text", text: `[kernel runtime] ${s}` }], details: { stage: s } });
 	}
 
 	pi.registerTool({
@@ -96,14 +53,14 @@ export default function kernelExtension(pi: ExtensionAPI) {
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const code = params.code as string;
 			const timeoutSec = Math.min(Math.max((params.timeout as number | undefined) ?? 30, 1), 300);
-			const proc = await getKernel(ctx.cwd, (s) => _onUpdate?.({ content: [{ type: "text", text: `[kernel runtime] ${s}` }], details: { stage: s } }));
+			const proc = await session.get(ctx.cwd, stage(_onUpdate));
 			try {
 				const { timedOut, result } = await proc.execute(code, timeoutSec * 1000);
 				if (!result) {
 					throw new Error("kernel returned no result");
 				}
 				return {
-					content: [{ type: "text", text: fallbackWarning() + initWarning(proc) + formatExecuteResult(result, timedOut) }],
+					content: [{ type: "text", text: session.warningText() + formatExecuteResult(result, timedOut) }],
 					details: { tool: "kernel_run", timedOut },
 				};
 			} catch (err) {
@@ -132,13 +89,13 @@ export default function kernelExtension(pi: ExtensionAPI) {
 			detail: Type.Optional(Type.Boolean({ description: "Show description/created/source for global objects (default false)." })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const proc = await getKernel(ctx.cwd, (s) => _onUpdate?.({ content: [{ type: "text", text: `[kernel runtime] ${s}` }], details: { stage: s } }));
+			const proc = await session.get(ctx.cwd, stage(_onUpdate));
 			const res = (await proc.call("ls", {
 				scope: (params.scope as string | undefined) ?? "all",
 				pattern: params.pattern,
 			})) as { session: LsEntry[]; global: LsEntry[] };
 			return {
-				content: [{ type: "text", text: fallbackWarning() + initWarning(proc) + formatLs(res.session ?? [], res.global ?? [], params.detail === true) }],
+				content: [{ type: "text", text: session.warningText() + formatLs(res.session ?? [], res.global ?? [], params.detail === true) }],
 				details: { tool: "kernel_ls", counts: { session: res.session?.length ?? 0, global: res.global?.length ?? 0 } },
 			};
 		},
@@ -165,7 +122,7 @@ export default function kernelExtension(pi: ExtensionAPI) {
 			force: Type.Optional(Type.Boolean({ description: "Retrieve a stale global object anyway (default false)." })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const proc = await getKernel(ctx.cwd, (s) => _onUpdate?.({ content: [{ type: "text", text: `[kernel runtime] ${s}` }], details: { stage: s } }));
+			const proc = await session.get(ctx.cwd, stage(_onUpdate));
 			const res = (await proc.call("get", {
 				name: params.name,
 				summarize: params.summarize !== false,
@@ -173,7 +130,7 @@ export default function kernelExtension(pi: ExtensionAPI) {
 				force: params.force === true,
 			})) as GetResult;
 			return {
-				content: [{ type: "text", text: fallbackWarning() + initWarning(proc) + formatGet(res) }],
+				content: [{ type: "text", text: session.warningText() + formatGet(res) }],
 				details: { tool: "kernel_get", name: params.name },
 			};
 		},
@@ -201,7 +158,7 @@ export default function kernelExtension(pi: ExtensionAPI) {
 			expected_version: Type.Optional(Type.Number({ description: "Require this version to be the current one (optimistic lock)." })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const proc = await getKernel(ctx.cwd, (s) => _onUpdate?.({ content: [{ type: "text", text: `[kernel runtime] ${s}` }], details: { stage: s } }));
+			const proc = await session.get(ctx.cwd, stage(_onUpdate));
 			const res = (await proc.call("publish", {
 				name: params.name,
 				description: params.description,
@@ -209,15 +166,13 @@ export default function kernelExtension(pi: ExtensionAPI) {
 				expected_version: params.expected_version ?? null,
 			})) as { name: string; version: number; overwritten: boolean };
 			return {
-				content: [{ type: "text", text: fallbackWarning() + initWarning(proc) + formatPublish(res) }],
+				content: [{ type: "text", text: session.warningText() + formatPublish(res) }],
 				details: { tool: "kernel_publish", name: params.name, version: res.version, overwritten: res.overwritten },
 			};
 		},
 	});
 
 	pi.on("session_shutdown", async () => {
-		await kernel?.shutdown();
-		kernel = undefined;
-		kernelCwd = undefined;
+		await session.shutdown();
 	});
 }
