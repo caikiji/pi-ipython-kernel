@@ -20,6 +20,7 @@ export interface KernelProcessOptions {
 
 export interface ExecuteResult {
 	output: string;
+	output_truncated?: boolean;
 	error: string;
 	incomplete: boolean;
 	interrupted: boolean;
@@ -34,6 +35,7 @@ export class KernelProcess {
 	private starting?: Promise<void>;
 	private opts: KernelProcessOptions;
 	private helloInit: { path?: string; error?: string; registered: string[] } | null = null;
+	private executeQueue: Promise<unknown> = Promise.resolve();
 
 	constructor(opts: KernelProcessOptions) {
 		this.opts = opts;
@@ -87,37 +89,47 @@ export class KernelProcess {
 			: null;
 	}
 
+	/** Execute code with interrupt-on-timeout semantics. Concurrent calls
+	 * are serialized: the kernel executes one cell at a time, and the
+	 * timeout clock starts when execution actually begins. */
+	async execute(code: string, timeoutMs = 30_000): Promise<{ timedOut: boolean; result?: ExecuteResult }> {
+		// Register on the queue synchronously (call order = execution order);
+		// ensureStarted runs inside the slot, so spawn waits are serialized
+		// too and the timeout clock starts when the cell actually begins.
+		const run = this.executeQueue.then(async () => {
+			await this.ensureStarted();
+			const onTimeout = () => {
+				// SIGINT raises KeyboardInterrupt inside exec on POSIX; on
+				// Windows it cannot be caught, so fall back to kill + respawn.
+				if (process.platform === "win32") {
+					this.killSync();
+				} else {
+					this.proc?.kill("SIGINT");
+				}
+			};
+			try {
+				const res = (await this.client!.call("execute", { code }, { timeoutMs, onTimeout } satisfies CallOptions)) as {
+					timedOut: boolean;
+					result?: ExecuteResult;
+				};
+				return res;
+			} catch (err) {
+				if (err instanceof TimeoutError && process.platform === "win32") {
+					// killed above; next call respawns via ensureStarted
+				}
+				throw err;
+			}
+		});
+		// A failed cell must not poison the queue for later calls.
+		this.executeQueue = run.catch(() => undefined);
+		return run;
+	}
+
 	/** Generic RPC call (ls/get/publish). Errors surface as RpcError. */
 	async call<T = unknown>(method: string, params: unknown, timeoutMs = 30_000): Promise<T> {
 		await this.ensureStarted();
 		const res = await this.client!.call(method, params, { timeoutMs });
 		return res.result as T;
-	}
-
-	/** Execute code with interrupt-on-timeout semantics. */
-	async execute(code: string, timeoutMs = 30_000): Promise<{ timedOut: boolean; result?: ExecuteResult }> {
-		await this.ensureStarted();
-		const onTimeout = () => {
-			// SIGINT raises KeyboardInterrupt inside exec on POSIX; on
-			// Windows it cannot be caught, so fall back to kill + respawn.
-			if (process.platform === "win32") {
-				this.killSync();
-			} else {
-				this.proc?.kill("SIGINT");
-			}
-		};
-		try {
-			const res = (await this.client!.call("execute", { code }, { timeoutMs, onTimeout } satisfies CallOptions)) as {
-				timedOut: boolean;
-				result?: ExecuteResult;
-			};
-			return res;
-		} catch (err) {
-			if (err instanceof TimeoutError && process.platform === "win32") {
-				// killed above; next call respawns via ensureStarted
-			}
-			throw err;
-		}
 	}
 
 	/** Graceful shutdown; falls back to SIGKILL. */

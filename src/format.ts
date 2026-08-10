@@ -34,6 +34,9 @@ export function formatExecuteResult(result: ExecuteResult, timedOut: boolean): s
 	if (timedOut && !result.interrupted) {
 		parts.push("TIMEOUT: the code did not finish within the timeout and the kernel was interrupted.");
 	}
+	if (result.output_truncated) {
+		parts.push("NOTE: output was truncated because it exceeded the size limit.");
+	}
 	if (result.output) {
 		parts.push("OUTPUT:\n" + truncate(result.output.trimEnd(), MAX_OUTPUT));
 	}
@@ -131,7 +134,7 @@ export function formatGet(r: GetResult): string {
 	if (r.shadowed) flags.push("shadows a global object with the same name");
 	const parts = [`${head}${flags.length > 0 ? ", " + flags.join(", ") : ""})`];
 	if (r.summary) parts.push(r.summary);
-	if (r.full) parts.push(`FULL:\n${r.full}`);
+	if (r.full) parts.push(`FULL:\n${truncate(r.full, MAX_OUTPUT)}`);
 	return parts.join("\n\n");
 }
 
