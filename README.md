@@ -73,7 +73,7 @@ register("raw_df", pd.read_csv("sales.csv"), "Raw sales data.")        # 纯数�
 - 装饰器形式第二个位置参数就是描述（`@register("name", "desc")`，也可用 `description=`）；**注册纯字符串数据请用显式形式**（`register("name", obj="...", description="...")` 或三参）——裸字符串位置参数会被当作描述
 - `unregister(name)` 幂等注销：从 REGISTERED 区与（未被重新赋值的）会话变量中移除；仅当前会话生效，init 脚本在下个会话重新注册
 - 注册名同时是普通会话变量，`kernel_run` 可直接引用；`register` 在 `kernel_run` 里也可用，但仅当前会话有效——**跨会话注册的唯一途径是 init 脚本**
-- 修改 init 脚本在**下一个会话**生效（脚本每次内核启动执行一次）
+- 修改 init 脚本**热重载**：保存后下一次内核调用（任意工具）自动重新执行脚本并返回摘要（`[init] reloaded ...: +1 registered (foo), -1 vars (bar)`）；旧脚本注册过但新脚本删掉的名字自动注销、脚本变量同步清理（agent 后来改过的值保留）；重载失败则回滚，会话保持原样
 - **安全**：init 脚本是"每次会话自动执行的项目代码"，本身不扩大内核权限（agent 本就有 `kernel_run` 任意执行权），但变更不可见；本扩展按内容 hash 跨会话检测，脚本新增/变化时在会话开头提示一次（状态存缓存目录，不落工作区）；`kernel_init.py` 提交前请自行审阅，只从可信来源 pull
 ## 运行时
 

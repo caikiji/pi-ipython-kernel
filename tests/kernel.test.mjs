@@ -17,7 +17,7 @@ const serverPath = resolve(root, "python/server.py");
 
 const { JsonRpcClient } = await import("../src/rpc.ts");
 const { KernelProcess } = await import("../src/kernelProcess.ts");
-const { formatExecuteResult, truncate, formatLs, formatGet, formatPublish, formatDelete, registryLine, formatRegistrySummary } = await import("../src/format.ts");
+const { formatExecuteResult, truncate, formatLs, formatGet, formatPublish, formatDelete, registryLine, formatRegistrySummary, formatReload } = await import("../src/format.ts");
 const { checkInitHashes, rememberInitHashes, formatInitChanges } = await import("../src/initHashes.ts");
 let passed = 0;
 async function test(name, fn) {
@@ -114,6 +114,25 @@ await test("format: registry summary", () => {
 	assert.match(text, /\[kernel\] Workspace kernel is ready/);
 	assert.match(text, /load_sales\(path='sales\.csv'\) — Load sales data\./);
 	assert.equal(formatRegistrySummary([]), "");
+});
+
+await test("format: reload report", () => {
+	assert.equal(
+		formatReload({ path: ".kernel/init.py", registered_added: ["b"], registered_removed: ["a"], vars_added: [], vars_removed: ["GONE"], vars_updated: ["VAR"] }),
+		"[init] reloaded .kernel/init.py: +1 registered (b), -1 registered (a), -1 vars (GONE), 1 vars updated",
+	);
+	assert.equal(
+		formatReload({ path: ".kernel/init.py", error: "Traceback (most recent call last):\nValueError: boom", registered_added: [], registered_removed: [], vars_added: [], vars_removed: [], vars_updated: [] }),
+		"[init] reload FAILED .kernel/init.py: Traceback (most recent call last): — session untouched",
+	);
+	assert.equal(
+		formatReload({ path: null, registered_added: [], registered_removed: ["a"], vars_added: [], vars_removed: [], vars_updated: [] }),
+		"[init] reloaded (init script removed): -1 registered (a)",
+	);
+	assert.equal(
+		formatReload({ path: ".kernel/init.py", registered_added: [], registered_removed: [], vars_added: [], vars_removed: [], vars_updated: [] }),
+		"[init] reloaded .kernel/init.py: no changes",
+	);
 });
 
 await test("initHashes: first-seen and change detection", () => {
@@ -432,6 +451,32 @@ await test("kernel: init script registers names and reports", async () => {
 		assert.ok(ls.registered.some((e) => e.name === "CONST" && e.kind === "data"));
 		const exec = await k.execute("helper(21)");
 		assert.match(exec.result.output, /42/);
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
+await test("kernel: init script hot reloads on change without restart", async () => {
+	const wd = workspace();
+	mkdirSync(join(wd, ".kernel"), { recursive: true });
+	const initPath = join(wd, ".kernel", "init.py");
+	writeFileSync(initPath, "@register('helper', description='Doubles x.')\ndef helper(x):\n    return x * 2\nV = 10\n");
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		let r = await k.execute("helper(21) + V");
+		assert.match(r.result.output, /52/);
+		// rewrite the script: swap registration, update var
+		writeFileSync(initPath, "@register('triple', description='Triples x.')\ndef triple(x):\n    return x * 3\nV = 20\n");
+		const ls = await k.call("ls", { scope: "session" });
+		assert.ok(ls.reload, "ls response carries the reload report");
+		assert.equal(ls.reload.registered_added[0], "triple");
+		assert.equal(ls.reload.registered_removed[0], "helper");
+		assert.ok(ls.registered.some((e) => e.name === "triple" && e.kind === "function"));
+		assert.ok(!ls.registered.some((e) => e.name === "helper"), "dropped registration is gone");
+		// new code is live in the same process
+		r = await k.execute("triple(V)");
+		assert.match(r.result.output, /60/);
 	} finally {
 		await k.shutdown();
 		rmSync(wd, { recursive: true, force: true });

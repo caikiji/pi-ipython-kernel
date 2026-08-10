@@ -20,10 +20,12 @@ import {
 	formatGet,
 	formatLs,
 	formatPublish,
+	formatReload,
 	formatRegistrySummary,
 	type GetResult,
 	type LsEntry,
 	type RegistryEntry,
+	type ReloadReport,
 } from "../src/format.ts";
 import { checkInitHashes, formatInitChanges, rememberInitHashes } from "../src/initHashes.ts";
 export default function kernelExtension(pi: ExtensionAPI) {
@@ -41,6 +43,12 @@ export default function kernelExtension(pi: ExtensionAPI) {
 		return (s) => onUpdate?.({ content: [{ type: "text", text: `[kernel runtime] ${s}` }], details: { stage: s } });
 	}
 
+/** Init-script hot reload summary, prepended to tool output when a reload
+ * fired as part of the call. */
+function reloadText(res: { reload?: ReloadReport }): string {
+	return res.reload ? formatReload(res.reload) + "\n\n" : "";
+}
+
 	pi.registerTool({
 		name: "kernel_run",
 		label: "Kernel Run",
@@ -56,7 +64,7 @@ export default function kernelExtension(pi: ExtensionAPI) {
 			"Missing a package? Install it into the managed venv with the managed uv (from bash, never the system Python): `<cache>/uv/uv pip install --python <cache>/venv/bin/python <pkg>`, where cache is `$PI_KERNEL_CACHE` or `~/.cache/pi-ipython-kernel`. It becomes importable in the kernel immediately, no restart.",
 			"Project-level reusable code belongs in the workspace init script (`.kernel/init.py` machine-local / `kernel_init.py` committable) — it replays into the kernel on every session start. Items registered there show under REGISTERED in kernel_ls with signature + description; call them directly with kernel_run instead of rewriting them.",
 			"To register an item, edit the init script and use the DSL: `register(\"name\", obj, \"description\")` (explicit) or `@register(\"name\", \"description\")` (decorator; a bare string in obj position is the description, which falls back to the docstring's first line). Register string data explicitly as `register(\"name\", obj=\"...\", description=\"...\")`. Any object works — functions, callables, data (DataFrame/dict/constants). Use snake_case names; describe in English what it does, its key parameters and defaults (signatures and data summaries are extracted automatically). Re-registering a name overwrites (last-write-wins) and appends a notice to the run output; `unregister(\"name\")` (idempotent) drops an entry for the current session.",
-			"Init-script changes apply on the next session start (the script runs once per kernel start). To use a change immediately, re-run the script body or call register() from kernel_run — but that is session-only. The only way to register across sessions is the init script. Treat init scripts as executable project code: they auto-execute, so review changes and only pull from trusted sources.",
+			"Init-script changes hot-reload: after you save the script, the next kernel call re-executes it in the session and reports a summary (`[init] reloaded ...: +1 registered ...`); a failed reload rolls back and leaves the session untouched. Stale registrations and script vars dropped from the script are cleaned up; agent-side register()/unregister() calls are session-only and never touched by a reload. The init script remains the only cross-session path — treat it as executable project code: it auto-executes, so review changes and only pull from trusted sources.",
 		],
 		parameters: Type.Object({
 			code: Type.String({ description: "Python code to execute in the kernel." }),
@@ -74,7 +82,7 @@ export default function kernelExtension(pi: ExtensionAPI) {
 					throw new Error("kernel returned no result");
 				}
 				return {
-					content: [{ type: "text", text: session.warningText() + formatExecuteResult(result, timedOut) }],
+					content: [{ type: "text", text: session.warningText() + reloadText(result) + formatExecuteResult(result, timedOut) }],
 					details: { tool: "kernel_run", timedOut },
 				};
 			} catch (err) {
@@ -109,12 +117,12 @@ export default function kernelExtension(pi: ExtensionAPI) {
 			const res = (await proc.call("ls", {
 				scope: (params.scope as string | undefined) ?? "all",
 				pattern: params.pattern,
-			})) as { session: LsEntry[]; registered: RegistryEntry[]; global: LsEntry[] };
+			})) as { session: LsEntry[]; registered: RegistryEntry[]; global: LsEntry[]; reload?: ReloadReport };
 			return {
 				content: [
 					{
 						type: "text",
-						text: session.warningText() + formatLs(res.session ?? [], res.global ?? [], res.registered ?? [], params.detail === true),
+						text: session.warningText() + reloadText(res) + formatLs(res.session ?? [], res.global ?? [], res.registered ?? [], params.detail === true),
 					},
 				],
 				details: {
@@ -151,9 +159,9 @@ export default function kernelExtension(pi: ExtensionAPI) {
 				summarize: params.summarize !== false,
 				scope: (params.scope as string | undefined) ?? "auto",
 				force: params.force === true,
-			})) as GetResult;
+			})) as GetResult & { reload?: ReloadReport };
 			return {
-				content: [{ type: "text", text: session.warningText() + formatGet(res) }],
+				content: [{ type: "text", text: session.warningText() + reloadText(res) + formatGet(res) }],
 				details: { tool: "kernel_get", name: params.name },
 			};
 		},
@@ -187,9 +195,9 @@ export default function kernelExtension(pi: ExtensionAPI) {
 				description: params.description,
 				source: params.source ?? null,
 				expected_version: params.expected_version ?? null,
-			})) as { name: string; version: number; overwritten: boolean };
+			})) as { name: string; version: number; overwritten: boolean; reload?: ReloadReport };
 			return {
-				content: [{ type: "text", text: session.warningText() + formatPublish(res) }],
+				content: [{ type: "text", text: session.warningText() + reloadText(res) + formatPublish(res) }],
 				details: { tool: "kernel_publish", name: params.name, version: res.version, overwritten: res.overwritten },
 			};
 		},
@@ -216,10 +224,9 @@ export default function kernelExtension(pi: ExtensionAPI) {
 			const proc = await session.get(ctx.cwd, stage(_onUpdate));
 			const res = (await proc.call("delete", {
 				name: params.name,
-				expected_version: params.expected_version ?? null,
-			})) as { name: string; deleted: boolean; version: number | null };
+			})) as { name: string; deleted: boolean; version: number | null; reload?: ReloadReport };
 			return {
-				content: [{ type: "text", text: session.warningText() + formatDelete(res) }],
+				content: [{ type: "text", text: session.warningText() + reloadText(res) + formatDelete(res) }],
 				details: { tool: "kernel_delete", name: params.name, deleted: res.deleted, version: res.version ?? null },
 			};
 		},

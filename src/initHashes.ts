@@ -90,13 +90,13 @@ export function rememberInitHashes(cwd: string, statePath?: string): void {
 }
 
 /** Human-readable one-liner for each change, e.g.
- * `[kernel] init script CHANGED since last session: kernel_init.py (a1b2c3d4 -> e5f6a7b8). Review the diff before relying on it.` */
+ * `[kernel] init script CHANGED since last session: kernel_init.py (a1b2c3d4 -> e5f6a7b8). It hot-reloads on the next kernel call — review the diff before relying on it.` */
 export function formatInitChanges(changes: InitChange[]): string {
 	return changes
 		.map((c) =>
 			c.firstSeen
 				? `[kernel] init script will auto-execute on every session start: ${c.path}`
-				: `[kernel] init script CHANGED since last session: ${c.path} (${(c.previousHash ?? "?").slice(0, 8)} -> ${c.hash.slice(0, 8)}). Review the diff before relying on it.`,
+				: `[kernel] init script CHANGED since last session: ${c.path} (${(c.previousHash ?? "?").slice(0, 8)} -> ${c.hash.slice(0, 8)}). It hot-reloads on the next kernel call — review the diff before relying on it.`,
 		)
 		.join("\n");
 }

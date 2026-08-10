@@ -324,6 +324,97 @@ class RpcServerTest(unittest.TestCase):
         init = srv.handle({"method": "hello"})["init"]
         self.assertIn("overwrote existing entry 'k'", init["output"])
 
+    def init_script_path(self, srv):
+        return os.path.join(srv.workspace, ".kernel", "init.py")
+
+    def test_init_script_hot_reload(self):
+        srv = self.init_server("@register('a', 'fn a')\ndef a():\n    return 1\nVAR = 10\nGONE = 'x'\n")
+        srv.handle({"method": "hello"})
+        with open(self.init_script_path(srv), "w") as f:
+            f.write("@register('b', 'fn b')\ndef b():\n    return 2\nVAR = 20\n")
+        ls = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        rel = ls["reload"]
+        self.assertEqual(rel["path"], ".kernel/init.py")
+        self.assertEqual(rel["error"], "")
+        self.assertEqual(rel["registered_added"], ["b"])
+        self.assertEqual(rel["registered_removed"], ["a"])
+        self.assertEqual(rel["vars_removed"], ["GONE"])
+        self.assertEqual(rel["vars_updated"], ["VAR"])
+        self.assertEqual([e["name"] for e in ls["registered"]], ["b"])
+        # new code is live: b callable, VAR updated
+        out = srv.handle({"method": "execute", "params": {"code": "b() + VAR"}})
+        self.assertIn("22", out["output"])
+        # no reload when nothing changed afterwards
+        ls2 = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        self.assertNotIn("reload", ls2)
+
+    def test_init_script_hot_reload_failure_rolls_back(self):
+        srv = self.init_server("@register('a', 'fn a')\ndef a():\n    return 1\nV = 1\n")
+        srv.handle({"method": "hello"})
+        with open(self.init_script_path(srv), "w") as f:
+            f.write("register('junk', 1, 'junk')\nraise ValueError('boom')\n")
+        ls = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        rel = ls["reload"]
+        self.assertIn("ValueError", rel["error"])
+        # session untouched: registry intact, no junk, old code still works
+        self.assertEqual([e["name"] for e in ls["registered"]], ["a"])
+        out = srv.handle({"method": "execute", "params": {"code": "a() + V"}})
+        self.assertIn("2", out["output"])
+        ls2 = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        self.assertEqual([e["name"] for e in ls2["registered"]], ["a"])
+
+    def test_init_script_hot_reload_keeps_agent_registrations(self):
+        srv = self.init_server("@register('a', 'fn a')\ndef a():\n    return 1\n")
+        srv.handle({"method": "hello"})
+        srv.handle({"method": "execute", "params": {"code": "register('mine', 1, 'agent')"}})
+        with open(self.init_script_path(srv), "w") as f:
+            f.write("@register('b', 'fn b')\ndef b():\n    return 2\n")
+        ls = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        self.assertEqual([e["name"] for e in ls["registered"]], ["b", "mine"])
+
+    def test_init_script_hot_reload_same_content_no_reload(self):
+        code = "@register('a', 'fn a')\ndef a():\n    return 1\n"
+        srv = self.init_server(code)
+        srv.handle({"method": "hello"})
+        with open(self.init_script_path(srv), "w") as f:
+            f.write(code)  # touched, identical content
+        ls = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        self.assertNotIn("reload", ls)
+
+    def test_init_script_hot_reload_deleted_file(self):
+        srv = self.init_server("@register('a', 'fn a')\ndef a():\n    return 1\nV = 1\n")
+        srv.handle({"method": "hello"})
+        os.remove(self.init_script_path(srv))
+        ls = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        rel = ls["reload"]
+        self.assertIsNone(rel["path"])
+        self.assertEqual(rel["registered_removed"], ["a"])
+        self.assertEqual(ls["registered"], [])
+        out = srv.handle({"method": "execute", "params": {"code": "V"}})
+        self.assertIn("NameError", out["error"])
+
+    def test_init_script_hot_reload_keeps_reassigned_var(self):
+        srv = self.init_server("V = 1\n")
+        srv.handle({"method": "hello"})
+        srv.handle({"method": "execute", "params": {"code": "V = 99"}})
+        with open(self.init_script_path(srv), "w") as f:
+            f.write("W = 2\n")
+        srv.handle({"method": "ls", "params": {"scope": "session"}})
+        out = srv.handle({"method": "execute", "params": {"code": "V"}})
+        self.assertIn("99", out["output"])
+
+    def test_init_script_hot_reload_reexecutes_same_name(self):
+        srv = self.init_server("@register('a', 'one')\ndef a():\n    return 1\n")
+        srv.handle({"method": "hello"})
+        with open(self.init_script_path(srv), "w") as f:
+            f.write("@register('a', 'two')\ndef a():\n    return 2\n")
+        ls = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        rel = ls["reload"]
+        self.assertEqual(rel["registered_added"], [])
+        self.assertEqual(rel["registered_removed"], [])
+        self.assertEqual([e["name"] for e in ls["registered"]], ["a"])
+        self.assertEqual(ls["registered"][0]["description"], "two")
+
     def test_ls_includes_registered(self):
         srv = self.make_server()
         srv.handle({"method": "execute", "params": {"code": "register('cfg', {'a': 1}, 'Config.')"}})

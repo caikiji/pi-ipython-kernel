@@ -66,6 +66,49 @@ export function truncate(text: string, max: number): string {
 	return text.slice(0, max) + `\n... [truncated ${text.length - max} chars]`;
 }
 
+// ------------------------------------------------------------ init hot reload
+
+export interface ReloadReport {
+	/** Workspace-relative script path, or null when the script was removed. */
+	path: string | null;
+	/** Output printed by the re-executed script (capped server-side). */
+	output?: string;
+	error?: string;
+	registered_added: string[];
+	registered_removed: string[];
+	vars_added: string[];
+	vars_removed: string[];
+	vars_updated: string[];
+}
+
+const MAX_LISTED = 8;
+
+function listNames(names: string[], label: string): string {
+	const shown = names.slice(0, MAX_LISTED).join(", ");
+	const more = names.length > MAX_LISTED ? `, +${names.length - MAX_LISTED} more` : "";
+	return `${label} (${shown}${more})`;
+}
+
+/** One-line summary of a hot reload, e.g.
+ * `[init] reloaded .kernel/init.py: +1 registered (clean_df), -1 registered (old_fn), 2 vars updated` */
+export function formatReload(r: ReloadReport): string {
+	const where = r.path ?? "(init script removed)";
+	let head: string;
+	if (r.error) {
+		head = `[init] reload FAILED ${where}: ${r.error.split("\n")[0].trim()} — session untouched`;
+	} else {
+		const parts: string[] = [];
+		if (r.registered_added.length > 0) parts.push(listNames(r.registered_added, `+${r.registered_added.length} registered`));
+		if (r.registered_removed.length > 0) parts.push(listNames(r.registered_removed, `-${r.registered_removed.length} registered`));
+		if (r.vars_added.length > 0) parts.push(listNames(r.vars_added, `+${r.vars_added.length} vars`));
+		if (r.vars_removed.length > 0) parts.push(listNames(r.vars_removed, `-${r.vars_removed.length} vars`));
+		if (r.vars_updated.length > 0) parts.push(`${r.vars_updated.length} vars updated`);
+		head = `[init] reloaded ${where}:${parts.length > 0 ? " " + parts.join(", ") : " no changes"}`;
+	}
+	const out = [head];
+	if (r.output) out.push("OUTPUT:\n" + r.output.trimEnd());
+	return out.join("\n");
+}
 // ------------------------------------------------------------ ls / get / publish
 
 export interface LsEntry {

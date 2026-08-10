@@ -5,6 +5,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import type { ReloadReport } from "./format.ts";
 import { JsonRpcClient, TimeoutError, type CallOptions } from "./rpc.ts";
 
 export interface KernelProcessOptions {
@@ -27,6 +28,8 @@ export interface ExecuteResult {
 	new: Array<{ name: string; type: string }>;
 	changed: string[];
 	removed: string[];
+	/** Init-script hot reload report, when a reload fired on this call. */
+	reload?: ReloadReport;
 }
 
 export class KernelProcess {

@@ -35,6 +35,7 @@ from __future__ import annotations
 import ast
 import codeop
 import contextlib
+import hashlib
 import inspect
 import io
 import json
@@ -53,6 +54,9 @@ VERSION = "0.1.0"
 # the RPC channel from accidental giant prints (e.g. printing a huge
 # dataframe). Truncated output is flagged, never silently dropped.
 MAX_OUTPUT_CHARS = 2 * 1024 * 1024
+# Cap for init-script output echoed in hot-reload reports (scripts can
+# print; keep the RPC response small).
+RELOAD_OUTPUT_CAP = 4000
 # Names ignored in namespace diffs (IPython convention: leading underscore).
 _PRIVATE = lambda name: name.startswith("_")  # noqa: E731
 
@@ -129,6 +133,16 @@ class Executor:
         # unregister) and notices surfaced in the next run() output.
         self._registry_objs: dict[str, object] = {}
         self._notices: list[str] = []
+        # True while the init script executes (register() then marks entries
+        # as init-origin, so hot reload reconciles them), plus the names the
+        # current init script defines in the session namespace.
+        self._replaying_init = False
+        # Names/objects the current init script defines in the session
+        # namespace (hot reload tracks them to clean up stale bindings).
+        self._init_var_objs: dict[str, object] = {}
+        # Names register()ed while _replaying_init (reset per reload run);
+        # hot reload uses it to tell re-registrations from untouched entries.
+        self._replay_registered: set[str] = set()
 
     # -- namespace ----------------------------------------------------
 
@@ -201,16 +215,22 @@ class Executor:
         """
 
         def unregister(name: str) -> bool:
-            if name not in self._registry:
-                return False
-            obj = self._registry_objs.pop(name, None)
-            self._registry.pop(name)
-            if self._ns.get(name) is obj:
-                del self._ns[name]
-            return True
+            return self._do_unregister(name)
 
         unregister.__doc__ = type(self)._make_unregister.__doc__
         return unregister
+
+    def _do_unregister(self, name: str) -> bool:
+        """Remove a registry entry; also drop the namespace binding when it
+        is still the registered object (a later user assignment survives)."""
+        if name not in self._registry:
+            return False
+        obj = self._registry_objs.pop(name, None)
+        self._registry.pop(name)
+        self._replay_registered.discard(name)
+        if self._ns.get(name) is obj:
+            del self._ns[name]
+        return True
 
     def _do_register(self, name: str, obj, description: str) -> None:
         kind, detail, doc = _describe_registrable(obj)
@@ -221,7 +241,10 @@ class Executor:
             "description": description or doc,
             "detail": detail,
             "doc": doc,
+            "origin": "init" if self._replaying_init else "session",
         }
+        if self._replaying_init:
+            self._replay_registered.add(name)
         self._registry_objs[name] = obj
         # Registered names are usable in the session namespace (direct
         # calls/references); ls hides them from the SESSION section because
@@ -237,15 +260,22 @@ class Executor:
 
     def registry_snapshot(self) -> list[dict]:
         """Registered entries (name/kind/description/detail/doc), sorted."""
-        return [self._registry[k] for k in sorted(self._registry)]
+        return [
+            {k: v for k, v in self._registry[k].items() if k != "origin"}
+            for k in sorted(self._registry)
+        ]
 
-    def _snapshot(self) -> dict:
-        """Map of public name -> object id, for rebinding detection."""
+    def _snapshot_objs(self) -> dict:
+        """Map of public name -> object (for reload var tracking)."""
         return {
-            k: id(v)
+            k: v
             for k, v in self._ns.items()
             if not _PRIVATE(k) and k not in _KERNEL_BUILTINS and k not in self._registry
         }
+
+    def _snapshot(self) -> dict:
+        """Map of public name -> object id, for rebinding detection."""
+        return {k: id(v) for k, v in self._snapshot_objs().items()}
 
     def _diff(self, before: dict) -> tuple:
         after = self._snapshot()
@@ -409,24 +439,173 @@ def make_executor() -> Executor:
 class Server:
     def __init__(self, executor: Executor, workspace: str) -> None:
         self.executor = executor
+        self.workspace = workspace
         self.store = storage.GlobalStore(workspace)
         # Replay layer (RULES.md): an init script is executed into the
         # session namespace at startup, so code/functions defined there
         # are re-registered on every fresh session instead of snapshotted.
         self.init_report = load_init_script(executor, workspace)
+        # Hot reload state: the active init script's mtime/size/hash. The
+        # script re-executes (reload) when the content changes between RPCs.
+        self._init_state: dict | None = None
+        if self.init_report is not None:
+            try:
+                self._record_init_state(self.init_report["path"])
+            except OSError:
+                pass  # next RPC re-checks from scratch
 
     def handle(self, msg: dict) -> dict | None:
         method = msg.get("method")
         params = msg.get("params") or {}
+        reload_report = self._maybe_reload()
         try:
-            return self._dispatch(method, params)
+            resp = self._dispatch(method, params)
         except storage.ConflictError as exc:
             return {"error": {"code": "conflict", "message": str(exc)}}
         except storage.PublishError as exc:
             return {"error": {"code": "publish", "message": str(exc)}}
         except KeyError as exc:
             return {"error": {"code": "not_found", "message": str(exc)}}
+        if resp is not None and "error" not in resp and reload_report is not None:
+            resp["reload"] = reload_report
+        return resp
 
+    # -- init script hot reload ------------------------------------------
+
+    def _record_init_state(self, rel: str) -> None:
+        """Remember the active init script's mtime/size/hash."""
+        path = os.path.join(self.workspace, rel)
+        st = os.stat(path)
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        self._init_state = {
+            "path": rel,
+            "mtime": st.st_mtime,
+            "size": st.st_size,
+            "hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        }
+
+    def _maybe_reload(self) -> dict | None:
+        """Hot reload: re-run the init script when its content changed.
+
+        Called before every RPC; one stat when nothing changed. Returns a
+        reload report to attach to the response, or None."""
+        rel = find_init_script(self.workspace)
+        prev = self._init_state
+        if rel is None:
+            if prev is None:
+                return None
+            self._init_state = None
+            return self._do_reload(None)  # script deleted: reconcile to empty
+        path = os.path.join(self.workspace, rel)
+        st = os.stat(path)
+        unchanged = (
+            prev is not None
+            and prev["path"] == rel
+            and prev["mtime"] == st.st_mtime
+            and prev["size"] == st.st_size
+        )
+        if unchanged:
+            return None
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        self._init_state = {"path": rel, "mtime": st.st_mtime, "size": st.st_size, "hash": digest}
+        if prev is not None and prev["path"] == rel and prev["hash"] == digest:
+            return None  # touched but identical: refresh state, no reload
+        return self._do_reload(rel)
+
+    def _do_reload(self, rel: str | None) -> dict:
+        """Re-execute the init script and reconcile the session with it.
+
+        Atomic: on any failure the session namespace and registry are
+        restored to their pre-reload state and the error is reported."""
+        ex = self.executor
+        ns_snap = dict(ex._ns)
+        reg_snap = dict(ex._registry)
+        objs_snap = dict(ex._registry_objs)
+        before_registry = set(ex.registry_names())
+        before_vars = set(ex._init_var_objs)
+        old_var_objs = dict(ex._init_var_objs)
+        before_objs = ex._snapshot_objs()
+        report: dict = {
+            "path": rel,
+            "output": "",
+            "error": "",
+            "registered_added": [],
+            "registered_removed": [],
+            "vars_added": [],
+            "vars_removed": [],
+            "vars_updated": [],
+        }
+        try:
+            if rel is None:
+                # Script gone: drop everything it registered and defined.
+                stale = {n for n, e in reg_snap.items() if e.get("origin") == "init"}
+                for name in sorted(stale):
+                    ex._do_unregister(name)
+                for name in sorted(before_vars):
+                    if ex._ns.get(name) is old_var_objs.get(name):
+                        del ex._ns[name]
+                ex._init_var_objs = {}
+                report["registered_removed"] = sorted(stale)
+                return report
+            with open(os.path.join(self.workspace, rel), encoding="utf-8") as f:
+                code = f.read()
+            ex._replay_registered = set()
+            ex._replaying_init = True
+            try:
+                result = ex.run(code)
+            finally:
+                ex._replaying_init = False
+            if len(result.output) > RELOAD_OUTPUT_CAP:
+                report["output"] = result.output[:RELOAD_OUTPUT_CAP] + "\n... [reload output truncated]"
+            else:
+                report["output"] = result.output
+            if result.error or result.interrupted:
+                raise RuntimeError(result.error or "interrupted")
+            after_registry = set(ex.registry_names())
+            # Drop init-origin entries the new script no longer registers
+            # (_replay_registered = names (re)registered during the run);
+            # agent-side registrations (origin "session") survive.
+            stale = {
+                n for n, e in reg_snap.items() if e.get("origin") == "init" and n not in ex._replay_registered
+            }
+            for name in sorted(stale):
+                ex._do_unregister(name)
+            # Names the new script binds in the session namespace.
+            after_objs = ex._snapshot_objs()
+            after_vars = (set(after_objs) - set(before_objs)) | {
+                n for n in before_objs.keys() & after_objs.keys() if before_objs[n] is not after_objs[n]
+            }
+            # Script vars the new script dropped: remove only when the
+            # binding is still the old script's object (a later user
+            # assignment survives, like unregister).
+            removed_vars = []
+            for name in sorted(before_vars - after_vars - after_registry):
+                if ex._ns.get(name) is old_var_objs.get(name):
+                    del ex._ns[name]
+                    removed_vars.append(name)
+            ex._init_var_objs = {n: ex._ns[n] for n in after_vars}
+            report["registered_added"] = sorted(after_registry - before_registry)
+            report["registered_removed"] = sorted(stale)
+            report["vars_added"] = sorted(after_vars - before_vars)
+            report["vars_removed"] = removed_vars
+            report["vars_updated"] = sorted(after_vars & before_vars)
+            return report
+        except BaseException as exc:  # noqa: BLE001 - rollback and report
+            ex._registry = reg_snap
+            ex._registry_objs = objs_snap
+            for k, v in ns_snap.items():
+                if ex._ns.get(k) is not v:
+                    ex._ns[k] = v
+            for k in [
+                k for k in ex._ns if k not in ns_snap and k not in _KERNEL_BUILTINS and k not in _IPYTHON_RESERVED
+            ]:
+                del ex._ns[k]
+            ex._init_var_objs = old_var_objs
+            report["error"] = str(exc)
+            return report
     def _dispatch(self, method: str, params: dict) -> dict | None:
         if method == "hello":
             return {
@@ -561,33 +740,46 @@ def _match_name(pattern: str, name: str) -> bool:
     return fnmatch.fnmatchcase(name, pattern)
 
 
+def find_init_script(workspace: str) -> str | None:
+    """First existing init script candidate (workspace-relative), or None."""
+    for rel in (".kernel/init.py", "kernel_init.py"):
+        if os.path.isfile(os.path.join(workspace, rel)):
+            return rel
+    return None
+
+
 def load_init_script(executor: Executor, workspace: str) -> dict | None:
     """Run the workspace init script (if any) into the session namespace.
 
     Candidates, in order: .kernel/init.py (machine-local, gitignored) and
     kernel_init.py (project root, committable). The report travels with the
     hello response so the host can surface failures once per process."""
-    for rel in (".kernel/init.py", "kernel_init.py"):
-        path = os.path.join(workspace, rel)
-        if not os.path.isfile(path):
-            continue
-        before_registry = executor.registry_names()
-        try:
-            with open(path, encoding="utf-8") as f:
-                code = f.read()
-        except OSError as exc:
-            return {"path": rel, "output": "", "error": f"cannot read init script: {exc}"}
+    rel = find_init_script(workspace)
+    if rel is None:
+        return None
+    path = os.path.join(workspace, rel)
+    before_registry = executor.registry_names()
+    before_vars = set(executor._snapshot_objs())
+    try:
+        with open(path, encoding="utf-8") as f:
+            code = f.read()
+    except OSError as exc:
+        return {"path": rel, "output": "", "error": f"cannot read init script: {exc}"}
+    executor._replaying_init = True
+    try:
         result = executor.run(code)
-        registered = sorted(executor.registry_names() - before_registry)
-        return {
-            "path": rel,
-            "output": result.output,
-            "error": result.error,
-            "new": result.new,
-            "changed": result.changed,
-            "registered": registered,
-        }
-    return None
+    finally:
+        executor._replaying_init = False
+    executor._init_var_objs = {n: executor._ns[n] for n in set(executor._snapshot_objs()) - before_vars}
+    registered = sorted(executor.registry_names() - before_registry)
+    return {
+        "path": rel,
+        "output": result.output,
+        "error": result.error,
+        "new": result.new,
+        "changed": result.changed,
+        "registered": registered,
+    }
 
 
 def main() -> None:
