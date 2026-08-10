@@ -41,6 +41,7 @@ export default function kernelExtension(pi: ExtensionAPI) {
 			"A trailing bare expression (e.g. `df` or `1 + 1`) prints like a REPL, so you can inspect objects without print(). Keep big objects in the kernel and inspect with .head()/.describe()/summaries instead of dumping full contents into the conversation.",
 			"Exceptions return as ERROR with a traceback and the namespace is preserved; kernel-side errors do not fail the tool call. Timeout interrupts the call (KeyboardInterrupt semantics) and the kernel keeps serving.",
 			"System operations (installing packages, git, process management) belong in bash; kernel_run is for Python work.",
+			"Missing a package? Install it into the managed venv with the managed uv (from bash, never the system Python): `<cache>/uv/uv pip install --python <cache>/venv/bin/python <pkg>`, where cache is `$PI_KERNEL_CACHE` or `~/.cache/pi-ipython-kernel`. It becomes importable in the kernel immediately, no restart.",
 		],
 		parameters: Type.Object({
 			code: Type.String({ description: "Python code to execute in the kernel." }),

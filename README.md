@@ -61,6 +61,7 @@ pi 扩展 (TypeScript, jiti 加载)
 2. 下载固定版本 uv（官方 .sha256 校验）→ `uv python install 3.13` → 建 venv → 装依赖（ipython/numpy/pandas/pyarrow）
 3. 缓存于 `$PI_KERNEL_CACHE` 或 `~/.cache/pi-ipython-kernel/`，之后秒级复用；清单变化自动重建
 4. 引导失败自动降级系统 python3 并提示一次
+5. 需要新包时用托管 uv 装进托管 venv：`~/.cache/pi-ipython-kernel/uv/uv pip install --python ~/.cache/pi-ipython-kernel/venv/bin/python <pkg>`（路径由 `$PI_KERNEL_CACHE` 可覆盖），装完当前会话即可 import
 
 升 Python 版本只改 `runtime.json`，不重新发包。
 
