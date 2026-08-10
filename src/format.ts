@@ -80,18 +80,50 @@ export interface LsEntry {
 	"source_path"?: string | null;
 }
 
-export function formatLs(session: LsEntry[], global: LsEntry[], detail: boolean): string {
+export interface RegistryEntry {
+	name: string;
+	kind: "function" | "callable" | "data";
+	description: string;
+	detail: string;
+	doc: string;
+}
+
+export function formatLs(session: LsEntry[], global: LsEntry[], registered: RegistryEntry[], detail: boolean): string {
 	const parts: string[] = [];
-	if (session.length === 0 && global.length === 0) {
+	if (session.length === 0 && global.length === 0 && registered.length === 0) {
 		return "No objects. Define some with kernel_run, or load with kernel_get.";
 	}
 	if (session.length > 0) {
 		parts.push(`SESSION (${session.length}):` + lines(session.map((o) => lsLine(o, detail, "session"))));
 	}
+	if (registered.length > 0) {
+		parts.push(`REGISTERED (${registered.length}):` + lines(registered.map(registryLine)));
+	}
 	if (global.length > 0) {
 		parts.push(`GLOBAL (${global.length}):` + lines(global.map((o) => lsLine(o, detail, "global"))));
 	}
 	return parts.join("\n\n");
+}
+
+/** One line per registered entry, e.g.
+ * `  [fn]   load_sales(path='sales.csv') — Load sales data as DataFrame.` */
+export function registryLine(e: RegistryEntry): string {
+	const kind = e.kind === "function" ? "fn" : e.kind === "callable" ? "call" : "data";
+	// Signatures start with "(" and read naturally glued to the name
+	// (load_sales(path=...)); structural summaries need a separator.
+	const sep = e.detail.startsWith("(") ? "" : " ";
+	const head = `  [${kind}] ${e.name}${e.detail ? sep + e.detail : ""}`;
+	const note = e.description || e.doc;
+	return note ? `${head} — ${note}` : head;
+}
+
+/** Compact summary of the registry for agent-start injection. */
+export function formatRegistrySummary(registered: RegistryEntry[]): string {
+	if (registered.length === 0) return "";
+	return (
+		"[kernel] Workspace kernel is ready. Registered callables/data (replayed from the init script on every session start; call them directly with kernel_run):\n" +
+		registered.map(registryLine).join("\n")
+	);
 }
 
 function lsLine(o: LsEntry, detail: boolean, scope: string): string {

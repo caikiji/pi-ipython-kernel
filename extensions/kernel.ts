@@ -10,10 +10,22 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KernelSession } from "../src/kernelSession.ts";
-import { formatExecuteResult, formatDelete, formatGet, formatLs, formatPublish, type GetResult, type LsEntry } from "../src/format.ts";
+import {
+	formatExecuteResult,
+	formatDelete,
+	formatGet,
+	formatLs,
+	formatPublish,
+	formatRegistrySummary,
+	type GetResult,
+	type LsEntry,
+	type RegistryEntry,
+} from "../src/format.ts";
+import { checkInitHashes, formatInitChanges, rememberInitHashes } from "../src/initHashes.ts";
 export default function kernelExtension(pi: ExtensionAPI) {
 	// python/server.py and runtime.json sit next to the package, one level
 	// above extensions/.
@@ -42,6 +54,9 @@ export default function kernelExtension(pi: ExtensionAPI) {
 			"Exceptions return as ERROR with a traceback and the namespace is preserved; kernel-side errors do not fail the tool call. Timeout interrupts the call (KeyboardInterrupt semantics) and the kernel keeps serving.",
 			"System operations (installing packages, git, process management) belong in bash; kernel_run is for Python work.",
 			"Missing a package? Install it into the managed venv with the managed uv (from bash, never the system Python): `<cache>/uv/uv pip install --python <cache>/venv/bin/python <pkg>`, where cache is `$PI_KERNEL_CACHE` or `~/.cache/pi-ipython-kernel`. It becomes importable in the kernel immediately, no restart.",
+			"Project-level reusable code belongs in the workspace init script (`.kernel/init.py` machine-local / `kernel_init.py` committable) — it replays into the kernel on every session start. Items registered there show under REGISTERED in kernel_ls with signature + description; call them directly with kernel_run instead of rewriting them.",
+			"To register an item, edit the init script and use the DSL: `register(\"name\", obj, \"description\")` (explicit) or `@register(\"name\", \"description\")` (decorator; description falls back to the docstring's first line). Any object works — functions, callables, data (DataFrame/dict/constants). Use snake_case names; describe in English what it does, its key parameters and defaults (signatures and data summaries are extracted automatically). Re-registering a name overwrites (last-write-wins).",
+			"Init-script changes apply on the next session start (the script runs once per kernel start). To use a change immediately, re-run the script body or call register() from kernel_run — but that is session-only. The only way to register across sessions is the init script. Treat init scripts as executable project code: they auto-execute, so review changes and only pull from trusted sources.",
 		],
 		parameters: Type.Object({
 			code: Type.String({ description: "Python code to execute in the kernel." }),
@@ -76,10 +91,11 @@ export default function kernelExtension(pi: ExtensionAPI) {
 		name: "kernel_ls",
 		label: "Kernel List",
 		description:
-			"Inventory what you already have before starting work: session variables (defined via kernel_run) and the workspace-global layer (objects published with kernel_publish). Global entries include version, size and staleness status.",
-		promptSnippet: "Inventory kernel session variables and published global objects",
+			"Inventory what you already have before starting work: REGISTERED project callables/data (replayed from the workspace init script), SESSION variables (defined via kernel_run), and the GLOBAL layer (objects published with kernel_publish). Registered entries show their signature and description; global entries include version, size and staleness status.",
+		promptSnippet: "Inventory kernel registered items, session variables, and global objects",
 		promptGuidelines: [
-			"Run this at the start of work in a workspace, or after a session switch: it shows reusable objects (loaded data, computed results) so you do not redo work.",
+			"Run this at the start of work in a workspace, or after a session switch: it shows reusable project functions/data (REGISTERED), loaded data (SESSION) and published results (GLOBAL) so you do not redo work.",
+			"REGISTERED entries are the project's reusable functions and data (from the init script, replayed every session). Read their signature and description, then call them directly with kernel_run — do not re-implement them.",
 			"Global objects flagged [INVALID] are stale snapshots (their source file changed); rebuild and re-publish rather than using them.",
 			"Session-layer variables are ephemeral — they die with the session; publish to the global layer to keep them across sessions.",
 		],
@@ -93,10 +109,18 @@ export default function kernelExtension(pi: ExtensionAPI) {
 			const res = (await proc.call("ls", {
 				scope: (params.scope as string | undefined) ?? "all",
 				pattern: params.pattern,
-			})) as { session: LsEntry[]; global: LsEntry[] };
+			})) as { session: LsEntry[]; registered: RegistryEntry[]; global: LsEntry[] };
 			return {
-				content: [{ type: "text", text: session.warningText() + formatLs(res.session ?? [], res.global ?? [], params.detail === true) }],
-				details: { tool: "kernel_ls", counts: { session: res.session?.length ?? 0, global: res.global?.length ?? 0 } },
+				content: [
+					{
+						type: "text",
+						text: session.warningText() + formatLs(res.session ?? [], res.global ?? [], res.registered ?? [], params.detail === true),
+					},
+				],
+				details: {
+					tool: "kernel_ls",
+					counts: { session: res.session?.length ?? 0, registered: res.registered?.length ?? 0, global: res.global?.length ?? 0 },
+				},
 			};
 		},
 	});
@@ -199,6 +223,48 @@ export default function kernelExtension(pi: ExtensionAPI) {
 				details: { tool: "kernel_delete", name: params.name, deleted: res.deleted, version: res.version ?? null },
 			};
 		},
+	});
+
+	// ----------------------------------------------------- agent-start context
+	//
+	// On the first agent turn (and again whenever the registry or an init
+	// script changes), inject a compact summary of the workspace kernel
+	// state into the conversation, so the agent knows what is available
+	// without having to call kernel_ls first. Re-injection is gated by a
+	// content hash: identical state is never re-injected.
+	const lastInjected = new Map<string, string>();
+
+	pi.on("before_agent_start", async (event) => {
+		const cwd = event.systemPromptOptions?.cwd;
+		if (!cwd) return;
+		const parts: string[] = [];
+		try {
+			const proc = await session.get(cwd);
+			const res = (await proc.call("ls", { scope: "session" })) as { registered?: RegistryEntry[] };
+			const entries = res.registered ?? [];
+			const hash = createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+			if (hash !== lastInjected.get(cwd)) {
+				const summary = formatRegistrySummary(entries);
+				if (summary) parts.push(summary);
+				lastInjected.set(cwd, hash);
+			}
+		} catch {
+			// Kernel not ready (e.g. bootstrap failed); skip the summary.
+		}
+		const changes = checkInitHashes(cwd);
+		if (changes.length > 0) {
+			parts.push(formatInitChanges(changes));
+			rememberInitHashes(cwd);
+		}
+		const content = parts.filter(Boolean).join("\n\n");
+		if (!content) return;
+		return {
+			message: {
+				customType: "kernel-registry",
+				content,
+				display: true,
+			},
+		};
 	});
 
 	pi.on("session_shutdown", async () => {

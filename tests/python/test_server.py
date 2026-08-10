@@ -97,6 +97,74 @@ class ExecEngineTest(unittest.TestCase):
         result = self.run_ok("import json")
         self.assertEqual(result.new, [{"name": "json", "type": "module"}])
 
+    def test_register_is_injected(self):
+        self.run_ok("register('probe', lambda: 1, 'probe')")
+        self.assertIn("probe", self.engine.registry_names())
+        self.assertNotIn("register", {o["name"] for o in self.engine.session_snapshot()})
+        self.assertNotIn("register", self.engine.run("x = 1").new + self.engine.run("y = 2").new)
+
+    def test_register_explicit_function(self):
+        self.run_ok(
+            "def f(a, b=1):\n"
+            "    \"\"\"First doc line.\n"
+            "    Second line ignored.\"\"\"\n"
+            "    return a + b\n"
+            "register('f', f, 'Adds a and b.')\n"
+        )
+        entry = self.engine.registry_snapshot()[0]
+        self.assertEqual(entry["name"], "f")
+        self.assertEqual(entry["kind"], "function")
+        self.assertEqual(entry["description"], "Adds a and b.")
+        self.assertEqual(entry["detail"], "(a, b=1)")
+        self.assertEqual(entry["doc"], "First doc line.")
+
+    def test_register_decorator_docstring_fallback(self):
+        self.run_ok(
+            "@register('g')\n"
+            "def g(x):\n"
+            "    \"\"\"Doubles x.\"\"\"\n"
+            "    return x * 2\n"
+        )
+        entry = self.engine.registry_snapshot()[0]
+        self.assertEqual(entry["description"], "Doubles x.")
+        self.assertEqual(entry["detail"], "(x)")
+
+    def test_register_decorator_with_description(self):
+        self.run_ok(
+            "@register('h', description='Halves x.')\n"
+            "def h(x):\n"
+            "    \"\"\"Not used.\"\"\"\n"
+            "    return x / 2\n"
+        )
+        self.assertEqual(self.engine.registry_snapshot()[0]["description"], "Halves x.")
+
+    def test_register_data_object(self):
+        self.run_ok(
+            "register('cfg', {'a': 1, 'b': [1, 2]}, 'Config dict.')\n"
+            "register('NAME', 'Acme', 'Company name.')\n"
+        )
+        by_name = {e["name"]: e for e in self.engine.registry_snapshot()}
+        cfg = by_name["cfg"]
+        name = by_name["NAME"]
+        self.assertEqual(cfg["kind"], "data")
+        self.assertEqual(cfg["detail"], "dict len=2")
+        self.assertEqual(cfg["doc"], "", "data objects must not inherit type docstrings")
+        self.assertEqual(name["kind"], "data")
+        self.assertEqual(name["detail"], "'Acme'")
+
+    def test_register_overwrite(self):
+        self.run_ok("register('k', 1, 'first')")
+        self.run_ok("register('k', 2, 'second')")
+        entries = self.engine.registry_snapshot()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["description"], "second")
+
+    def test_register_callable_object(self):
+        self.engine.set("_adder", type("Adder", (), {"__call__": lambda self, a, b: a + b})())
+        self.engine.run("register('adder', _adder, 'callable instance')")
+        entry = self.engine.registry_snapshot()[0]
+        self.assertEqual(entry["kind"], "callable")
+        self.assertEqual(entry["detail"], "(a, b)")
 
 @unittest.skipUnless(_ipython := server.make_executor().name == "ipython", "IPython not installed")
 class IPythonEngineTest(unittest.TestCase):
@@ -112,6 +180,10 @@ class IPythonEngineTest(unittest.TestCase):
         result = self.engine.run("x")
         self.assertIn("7", result.output)
 
+    def test_register_available(self):
+        result = self.engine.run("register('ip', lambda: 1, 'ipython probe')")
+        self.assertEqual(result.error, "")
+        self.assertIn("ip", self.engine.registry_names())
 
 class RpcServerTest(unittest.TestCase):
     def make_server(self):
@@ -171,6 +243,32 @@ class RpcServerTest(unittest.TestCase):
         out = srv.handle({"method": "execute", "params": {"code": "helper(CONST)"}})
         self.assertIn("84", out["output"])
 
+    def test_init_script_registered_names_reported(self):
+        srv = self.init_server(
+            "@register('double', description='Doubles a number.')\n"
+            "def double(x):\n"
+            "    return x * 2\n"
+            "register('CONST', 42, 'The answer.')\n"
+        )
+        init = srv.handle({"method": "hello"})["init"]
+        self.assertEqual(init["registered"], ["CONST", "double"])
+        # registered entries visible via ls and usable via execute
+        ls = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        self.assertEqual([e["name"] for e in ls["registered"]], ["CONST", "double"])
+        out = srv.handle({"method": "execute", "params": {"code": "double(CONST)"}})
+        self.assertIn("84", out["output"])
+
+    def test_ls_includes_registered(self):
+        srv = self.make_server()
+        srv.handle({"method": "execute", "params": {"code": "register('cfg', {'a': 1}, 'Config.')"}})
+        ls = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        self.assertEqual(len(ls["registered"]), 1)
+        self.assertEqual(ls["registered"][0]["name"], "cfg")
+        self.assertEqual(ls["registered"][0]["kind"], "data")
+        self.assertEqual(ls["registered"][0]["detail"], "dict len=1")
+        # pattern filters registered entries too
+        ls2 = srv.handle({"method": "ls", "params": {"scope": "session", "pattern": "nomatch*"}})
+        self.assertEqual(ls2["registered"], [])
     def test_init_script_error_reported(self):
         srv = self.init_server("raise ValueError('bad init')")
         init = srv.handle({"method": "hello"})["init"]

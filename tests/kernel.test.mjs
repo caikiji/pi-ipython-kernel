@@ -17,7 +17,8 @@ const serverPath = resolve(root, "python/server.py");
 
 const { JsonRpcClient } = await import("../src/rpc.ts");
 const { KernelProcess } = await import("../src/kernelProcess.ts");
-const { formatExecuteResult, truncate, formatLs, formatGet, formatPublish, formatDelete } = await import("../src/format.ts");
+const { formatExecuteResult, truncate, formatLs, formatGet, formatPublish, formatDelete, registryLine, formatRegistrySummary } = await import("../src/format.ts");
+const { checkInitHashes, rememberInitHashes, formatInitChanges } = await import("../src/initHashes.ts");
 let passed = 0;
 async function test(name, fn) {
 	try {
@@ -72,12 +73,75 @@ await test("format: ls with invalid flag", () => {
 	const text = formatLs(
 		[{ name: "x", type: "int" }],
 		[{ name: "df", type: "DataFrame", version: 2, size: 1024, valid: false, invalid_reason: "source changed" }],
+		[],
 		false,
 	);
 	assert.match(text, /SESSION \(1\):/);
 	assert.match(text, /x \(int\)/);
 	assert.match(text, /df \(DataFrame\) v2, 1.0 KB/);
 	assert.match(text, /INVALID: source changed/);
+});
+
+await test("format: ls with registered section", () => {
+	const text = formatLs(
+		[],
+		[],
+		[
+			{ name: "load_sales", kind: "function", description: "Load sales data.", detail: "(path='sales.csv')", doc: "Load the sales CSV." },
+			{ name: "raw_df", kind: "data", description: "Raw sales data.", detail: "DataFrame shape=(1200, 8)", doc: "" },
+			{ name: "adder", kind: "callable", description: "Adds two numbers.", detail: "(a, b)", doc: "" },
+		],
+		false,
+	);
+	assert.match(text, /REGISTERED \(3\):/);
+	assert.match(text, /\[fn\] load_sales\(path='sales\.csv'\) — Load sales data\./);
+	assert.match(text, /\[data\] raw_df DataFrame shape=\(1200, 8\) — Raw sales data\./);
+	assert.match(text, /\[call\] adder\(a, b\) — Adds two numbers\./);
+});
+
+await test("format: registered line falls back to doc", () => {
+	assert.equal(
+		registryLine({ name: "clean", kind: "function", description: "", detail: "(x)", doc: "Cleans input." }),
+		"  [fn] clean(x) — Cleans input.",
+	);
+	assert.equal(registryLine({ name: "cfg", kind: "data", description: "", detail: "dict len=1", doc: "" }), "  [data] cfg dict len=1");
+});
+
+await test("format: registry summary", () => {
+	const text = formatRegistrySummary([
+		{ name: "load_sales", kind: "function", description: "Load sales data.", detail: "(path='sales.csv')", doc: "" },
+	]);
+	assert.match(text, /\[kernel\] Workspace kernel is ready/);
+	assert.match(text, /load_sales\(path='sales\.csv'\) — Load sales data\./);
+	assert.equal(formatRegistrySummary([]), "");
+});
+
+await test("initHashes: first-seen and change detection", () => {
+	const dir = workspace();
+	const statePath = join(dir, "hashes.json");
+	mkdirSync(join(dir, ".kernel"));
+	const init = join(dir, ".kernel", "init.py");
+	writeFileSync(init, "def a():\n    return 1\n");
+	// first session: firstSeen
+	let changes = checkInitHashes(dir, statePath);
+	assert.equal(changes.length, 1);
+	assert.equal(changes[0].firstSeen, true);
+	assert.equal(changes[0].path, ".kernel/init.py");
+	rememberInitHashes(dir, statePath);
+	// unchanged: no notice
+	assert.equal(checkInitHashes(dir, statePath).length, 0);
+	// changed: notice with old -> new hashes
+	writeFileSync(init, "def a():\n    return 2\n");
+	changes = checkInitHashes(dir, statePath);
+	assert.equal(changes.length, 1);
+	assert.equal(changes[0].firstSeen, false);
+	assert.match(changes[0].previousHash ?? "", /^[0-9a-f]{64}$/);
+	assert.match(formatInitChanges(changes), /CHANGED since last session: \.kernel\/init\.py \(/);
+	rememberInitHashes(dir, statePath);
+	assert.equal(checkInitHashes(dir, statePath).length, 0);
+	// removed script: no longer tracked
+	rmSync(init);
+	assert.equal(checkInitHashes(dir, statePath).length, 0);
 });
 
 await test("format: get global loaded", () => {
@@ -349,16 +413,25 @@ await test("kernel: failed execute does not poison the queue", async () => {
 await test("kernel: init script registers names and reports", async () => {
 	const wd = workspace();
 	mkdirSync(join(wd, ".kernel"), { recursive: true });
-	writeFileSync(join(wd, ".kernel", "init.py"), "def helper(x):\n    return x * 2\nCONST = 42\n");
+	writeFileSync(
+		join(wd, ".kernel", "init.py"),
+		"@register('helper', description='Doubles x.')\ndef helper(x):\n    return x * 2\nregister('CONST', 42, 'The answer.')\n",
+	);
 	const k = new KernelProcess({ serverPath, cwd: wd });
 	try {
 		const r = await k.execute("helper(CONST)");
 		assert.match(r.result.output, /84/);
 		assert.equal(k.initReport?.path, ".kernel/init.py");
 		assert.ok(k.initReport?.registered.includes("helper"));
+		assert.ok(k.initReport?.registered.includes("CONST"));
 		assert.equal(k.initReport?.error, "");
 		const ls = await k.call("ls", { scope: "session" });
-		assert.ok(ls.session.some((o) => o.name === "helper"));
+		// registered names are usable and listed under REGISTERED, not SESSION
+		assert.ok(ls.session.every((o) => o.name !== "helper"));
+		assert.ok(ls.registered.some((e) => e.name === "helper" && e.kind === "function" && e.detail === "(x)"));
+		assert.ok(ls.registered.some((e) => e.name === "CONST" && e.kind === "data"));
+		const exec = await k.execute("helper(21)");
+		assert.match(exec.result.output, /42/);
 	} finally {
 		await k.shutdown();
 		rmSync(wd, { recursive: true, force: true });

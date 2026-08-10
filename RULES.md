@@ -31,7 +31,7 @@
 - 全局层对象存 SQLite BLOB，对象数据与元数据（名称、来源文件 hash、创建时间、版本号、描述）在同一事务提交；单对象默认上限 256MB，超限拒绝 publish
 - publish 冲突语义：同名并发发布 = last-write-wins + 返回 overwritten 提示（agent 场景避免卡死）；可选 expected_version 参数做乐观锁
 - 会话层（sessions/ 目录）物理隔离、即弃，不序列化、不跨上下文；进程崩溃留下的孤儿文件可清理
-- 重放层：代码/函数走重放不走快照——工作区 init 脚本（.kernel/init.py 本机 gitignore / kernel_init.py 项目根可提交）在每次会话进程启动时自动执行进会话命名空间；可审计、无序列化风险、天然免疫快照过期
+- 重放层：代码/函数走重放不走快照——工作区 init 脚本（.kernel/init.py 本机 gitignore / kernel_init.py 项目根可提交）在每次会话进程启动时自动执行进会话命名空间，`register(name, obj, description)`（或装饰器）注册常用函数/数据，kernel_ls 的 REGISTERED 区展示签名+描述，agent 直接 kernel_run 调用；可审计、无序列化风险、天然免疫快照过期
 - 运行时：Python 3.13.x 固定，由 uv + python-build-standalone 引导（runtime.json 清单，固定版本 + SHA256 校验），首次使用内核工具时惰性下载到缓存目录，不依赖、不修改系统 Python；下载清单与代码分离，升版本只改清单
 - 代码、注释、以及 agent 可见的输出（工具返回文本、错误消息）一律纯英文 ASCII；中文只允许出现在用户文档（README/RULES.md）
 - 测试：Python 侧用标准库 unittest（零第三方依赖可跑）；TS 侧用 Node ≥22.18 原生类型剥离直接 import .ts（零 npm install 可跑）；被测试 import 的 .ts 顶层不得静态 import pi 运行时包

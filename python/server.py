@@ -10,7 +10,7 @@ Methods:
   hello            -> {version, python, engine}
   execute {code}   -> {output, error, incomplete, interrupted,
                        new: [{name, type}], changed: [name], removed: [name]}
-  ls {scope, pattern}                        -> {session, global}
+  ls {scope, pattern}                        -> {session, registered, global}
   get {name, summarize, scope, force}        -> object meta + summary/full
   publish {name, description, source, expected_version}
                    -> {name, version, overwritten}
@@ -35,6 +35,7 @@ from __future__ import annotations
 import ast
 import codeop
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -58,6 +59,47 @@ _PRIVATE = lambda name: name.startswith("_")  # noqa: E731
 # Names IPython injects into user_ns; not user objects, never listed.
 _IPYTHON_RESERVED = frozenset({"In", "Out", "get_ipython", "exit", "quit", "open"})
 
+# Names the kernel injects into the session namespace; never listed as user
+# objects. `register` is the registration DSL used by init scripts and by
+# agents from kernel_run (session-scoped only).
+_KERNEL_BUILTINS = frozenset({"register"})
+
+
+def _describe_registrable(obj) -> tuple[str, str, str]:
+    """(kind, detail, doc) for a register() entry.
+
+    kind: function / callable / data. detail: the call signature for
+    callables, a one-line structural summary for data. doc: first line of
+    the docstring, if any."""
+    if inspect.isfunction(obj):
+        kind = "function"
+    elif callable(obj):
+        kind = "callable"
+    else:
+        kind = "data"
+    doc = ""
+    if kind in ("function", "callable"):
+        try:
+            raw = inspect.getdoc(obj)
+            if raw:
+                doc = raw.strip().splitlines()[0].strip()
+        except Exception:  # noqa: BLE001 - docs are best-effort
+            pass
+        pass
+    if kind in ("function", "callable"):
+        try:
+            detail = str(inspect.signature(obj))
+        except (ValueError, TypeError):
+            detail = ""
+    else:
+        try:
+            detail = summarize.summarize(obj, max_chars=300).splitlines()[0].strip()
+        except Exception:  # noqa: BLE001 - summaries are best-effort
+            detail = ""
+    if len(detail) > 200:
+        detail = detail[:197] + "..."
+    return kind, detail, doc
+
 
 @dataclass
 class ExecResult:
@@ -77,15 +119,64 @@ class Executor:
 
     def __init__(self) -> None:
         self._ns: dict = self._new_namespace()
+        # Registry of named callables/data declared via register() (replay
+        # layer: rebuilt from the init script on every session start).
+        self._registry: dict[str, dict] = {}
 
     # -- namespace ----------------------------------------------------
 
     def _new_namespace(self) -> dict:
-        return {"__name__": "__kernel__"}
+        ns = {"__name__": "__kernel__"}
+        ns["register"] = self._make_register()
+        return ns
+
+    def _make_register(self):
+        """Registration DSL shared by init scripts and kernel_run.
+
+        register(name, obj, description="")  -> registers obj, returns obj
+        @register(name, description="")      -> decorator; returns the function
+        description falls back to the docstring's first line.
+        """
+
+        def register(name, obj=None, description=""):
+            if obj is None:
+                def deco(fn):
+                    self._do_register(name, fn, description)
+                    return fn
+                return deco
+            self._do_register(name, obj, description)
+            return obj
+
+        return register
+
+    def _do_register(self, name: str, obj, description: str) -> None:
+        kind, detail, doc = _describe_registrable(obj)
+        self._registry[name] = {
+            "name": name,
+            "kind": kind,
+            "description": description or doc,
+            "detail": detail,
+            "doc": doc,
+        }
+        # Registered names are usable in the session namespace (direct
+        # calls/references); ls hides them from the SESSION section because
+        # the REGISTERED section already shows them.
+        self._ns[name] = obj
+
+    def registry_names(self) -> set[str]:
+        return set(self._registry)
+
+    def registry_snapshot(self) -> list[dict]:
+        """Registered entries (name/kind/description/detail/doc), sorted."""
+        return [self._registry[k] for k in sorted(self._registry)]
 
     def _snapshot(self) -> dict:
         """Map of public name -> object id, for rebinding detection."""
-        return {k: id(v) for k, v in self._ns.items() if not _PRIVATE(k)}
+        return {
+            k: id(v)
+            for k, v in self._ns.items()
+            if not _PRIVATE(k) and k not in _KERNEL_BUILTINS and k not in self._registry
+        }
 
     def _diff(self, before: dict) -> tuple:
         after = self._snapshot()
@@ -130,7 +221,7 @@ class Executor:
             (
                 {"name": k, "type": type(v).__name__}
                 for k, v in self._ns.items()
-                if not _PRIVATE(k) and k not in _IPYTHON_RESERVED
+                if not _PRIVATE(k) and k not in _IPYTHON_RESERVED and k not in _KERNEL_BUILTINS and k not in self._registry
             ),
             key=lambda o: o["name"],
         )
@@ -205,6 +296,9 @@ class IPythonEngine(Executor):
         self._shell.colors = "NoColor"
         self._shell.run_cell("pass")  # ensure init before first snapshot
         self._ns = self._shell.user_ns
+        # Re-inject the registration DSL: base-class namespace is replaced
+        # by the shell's user_ns above.
+        self._ns["register"] = self._make_register()
 
     def _execute(self, code: str, result: ExecResult) -> None:
         from IPython.core.error import InputRejected
@@ -306,6 +400,9 @@ class Server:
             out["session"] = [
                 o for o in self.executor.session_snapshot() if pattern is None or _match_name(pattern, o["name"])
             ]
+            out["registered"] = [
+                e for e in self.executor.registry_snapshot() if pattern is None or _match_name(pattern, e["name"])
+            ]
         if scope in ("all", "global"):
             out["global"] = self.store.list_objects(pattern)
         return out
@@ -396,18 +493,21 @@ def load_init_script(executor: Executor, workspace: str) -> dict | None:
         path = os.path.join(workspace, rel)
         if not os.path.isfile(path):
             continue
+        before_registry = executor.registry_names()
         try:
             with open(path, encoding="utf-8") as f:
                 code = f.read()
         except OSError as exc:
             return {"path": rel, "output": "", "error": f"cannot read init script: {exc}"}
         result = executor.run(code)
+        registered = sorted(executor.registry_names() - before_registry)
         return {
             "path": rel,
             "output": result.output,
             "error": result.error,
             "new": result.new,
             "changed": result.changed,
+            "registered": registered,
         }
     return None
 

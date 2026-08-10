@@ -83,9 +83,9 @@ export class KernelProcess {
 			timeoutMs: this.opts.spawnTimeoutMs ?? 30_000,
 			graceMs: 15_000,
 		});
-		const init = (hello.result as { init?: { path?: string; error?: string; new?: Array<{ name: string }> } } | undefined)?.init;
+		const init = (hello.result as { init?: { path?: string; error?: string; new?: Array<{ name: string }>; registered?: string[] } } | undefined)?.init;
 		this.helloInit = init?.path
-			? { path: init.path, error: init.error, registered: (init.new ?? []).map((n) => n.name) }
+			? { path: init.path, error: init.error, registered: init.registered ?? (init.new ?? []).map((n) => n.name) }
 			: null;
 	}
 

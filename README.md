@@ -12,7 +12,7 @@
 | 工具 | 频率 | 作用 |
 |---|---|---|
 | `kernel_run(code, timeout?)` | 高频 | 在持久内核里执行 Python，返回输出 + 命名空间差异（new/changed/removed） |
-| `kernel_ls(scope?, pattern?, detail?)` | 会话开场 | 列出会话层变量 + 全局层对象（含版本/大小/过期标记） |
+| `kernel_ls(scope?, pattern?, detail?)` | 会话开场 | 列出注册函数/数据（REGISTERED，来自 init 脚本）+ 会话层变量 + 全局层对象（含版本/大小/过期标记） |
 | `kernel_get(name, summarize?, scope?, force?)` | 取结果 | 取对象摘要（或全量），全局对象自动注入会话命名空间 |
 | `kernel_publish(name, description, source?, expected_version?)` | 交接 | 发布会话对象到全局层，强制描述，可带源文件做过期校验 |
 | `kernel_delete(name, expected_version?)` | 清理 | 删除全局层对象，幂等（不存在不报错），可带版本乐观锁；会话变量不受影响 |
@@ -46,13 +46,33 @@ pi 扩展 (TypeScript, jiti 加载)
 └── .gitignore            # .kernel/ 永不提交
 ```
 
-- **三层状态**：代码/函数走重放（init 脚本注册，M5+ 规划），数据走快照（SQLite 带元数据），会话走即弃
+- **三层状态**：代码/函数走重放（init 脚本注册），数据走快照（SQLite 带元数据），会话走即弃
 - **SQLite 就是锁**：事务原子性 + WAL 读写并发 + 崩溃恢复由存储引擎提供，不手写文件锁；多会话并发 publish 安全（last-write-wins + 覆盖提示，可选 `expected_version` 乐观锁）
 - **安全序列化**：只接受白名单类型（str/int/float/bool/None/bytes/datetime/list/dict + numpy 标量与数组 + pandas/polars DataFrame/Series），JSON 兜底 / npy / parquet 编码，**不做 pickle/cloudpickle 任意代码执行通道**；其他类型发布时拒绝并提示"导出为文件"
 - **快照过期**：publish 时可声明 `source=<文件>`，记录源文件 hash；源文件变化后 ls/get 标记 INVALID 并给出重建建议，不静默返回旧数据（`force=true` 可显式取回）
 - **读永远新鲜**：会话进程不缓存全局层对象，任何事务提交后立即可见
 - **Shadow 语义**：会话层与全局层同名对象，会话层优先（scope=auto）；显式 `scope=global` 取全局并覆盖会话层同名（标记 covered）
 
+### 注册机制（代码走重放）
+
+项目级常用函数/数据写在 init 脚本里，每次会话启动自动执行进内核，`kernel_ls` 的 REGISTERED 区展示签名与描述，agent 用 `kernel_run` 直接调用——不写重量级扩展，也不重复粘贴代码：
+
+```python
+# .kernel/init.py（本机，gitignored）或 kernel_init.py（项目根，可提交）
+def load_sales(path="sales.csv"):
+    """Load the sales CSV as a DataFrame."""
+    return pd.read_csv(path)
+
+register("load_sales", load_sales, "Load sales data as DataFrame.")   # 显式
+@register("clean_df", description="Cleaned data ready for modeling.")  # 装饰器（描述缺省取 docstring 首行）
+def clean_df(df): ...
+register("raw_df", pd.read_csv("sales.csv"), "Raw sales data.")        # 纯数据也可注册
+```
+
+- 签名（参数/默认值/返回标注）与数据摘要（df 给 shape/columns）自动提取；同名重复注册 = 覆盖（last-write-wins）
+- 注册名同时是普通会话变量，`kernel_run` 可直接引用；`register` 在 `kernel_run` 里也可用，但仅当前会话有效——**跨会话注册的唯一途径是 init 脚本**
+- 修改 init 脚本在**下一个会话**生效（脚本每次内核启动执行一次）
+- **安全**：init 脚本是"每次会话自动执行的项目代码"，本身不扩大内核权限（agent 本就有 `kernel_run` 任意执行权），但变更不可见；本扩展按内容 hash 跨会话检测，脚本新增/变化时在会话开头提示一次（状态存缓存目录，不落工作区）；`kernel_init.py` 提交前请自行审阅，只从可信来源 pull
 ## 运行时
 
 内核服务使用**托管 Python**，不依赖、不修改系统 Python：
