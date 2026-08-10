@@ -101,4 +101,6 @@ tests/                 # tests/python/*.py + tests/*.test.mjs
 - [x] M1 kernel_run（exec 引擎 + 差异报告 + 中断语义）
 - [x] M2 kernel_ls/get/publish + SQLite 全局层（跨会话持久化）
 - [x] M4 托管运行时引导（uv + python-build-standalone）
-- [ ] M3/M5 执行器升级（IPython 引擎接入）、重放层（init 脚本注册）、文档补全
+- [x] IPython 引擎接入（magics/rich repr，ANSI 清理 + 保留名过滤）
+- [x] 重放层：工作区 init 脚本（.kernel/init.py / kernel_init.py）启动时自动执行
+- [ ] 打磨：托管运行时真实下载验证（首次内核调用触发）
