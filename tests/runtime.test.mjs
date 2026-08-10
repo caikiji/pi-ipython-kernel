@@ -171,8 +171,10 @@ await test("bootstrap: concurrent temp dir is waited on, then reused", async () 
 	const cacheDir = mkdtempSync(join(tmpdir(), "rt-cache-"));
 	const { calls, manager } = makeManager(cacheDir);
 	try {
-		// Simulate another process mid-bootstrap: its temp dir exists.
-		mkdirSync(join(cacheDir, ".tmp-99999"), { recursive: true });
+		// Simulate another process mid-bootstrap: its temp dir exists. The
+		// owner pid is this test process (alive), so it is a genuine
+		// concurrent bootstrap, not an orphan.
+		mkdirSync(join(cacheDir, `.tmp-${process.pid}`), { recursive: true });
 		// While we poll, the "winner" finishes: artifacts + state.json appear.
 		setTimeout(() => {
 			const venvBin = join(cacheDir, "venv", "bin");
@@ -187,11 +189,33 @@ await test("bootstrap: concurrent temp dir is waited on, then reused", async () 
 					depsHash: depsHash(loadManifest(manifestPath).python.deps),
 				}),
 			);
-			rmSync(join(cacheDir, ".tmp-99999"), { recursive: true, force: true });
+			rmSync(join(cacheDir, `.tmp-${process.pid}`), { recursive: true, force: true });
 		}, 1_500);
 		const python = await manager.ensure();
 		assert.ok(python.endsWith(join("venv", "bin", "python")));
 		assert.equal(calls.length, 0, "reused the concurrent winner's runtime, no uv calls");
+	} finally {
+		rmSync(cacheDir, { recursive: true, force: true });
+	}
+});
+
+await test("bootstrap: orphaned temp dir is reaped, not waited on", async () => {
+	// Windows cannot probe process liveness; the reaping path is POSIX-only.
+	if (process.platform === "win32") {
+		console.log("skip - orphan reaping is POSIX-only");
+		return;
+	}
+	const cacheDir = mkdtempSync(join(tmpdir(), "rt-cache-"));
+	const { calls, manager } = makeManager(cacheDir);
+	try {
+		// A bootstrap killed mid-run (SIGKILL/crash) leaves its temp dir
+		// behind; the owner pid no longer exists. ensure() must reap the
+		// orphan and bootstrap itself instead of polling for the full
+		// 5-minute wait window. 2147483647 exceeds any real pid space.
+		mkdirSync(join(cacheDir, ".tmp-2147483647"), { recursive: true });
+		const python = await manager.ensure();
+		assert.ok(python.endsWith(join("venv", "bin", "python")));
+		assert.ok(calls.length > 0, "bootstrapped after reaping the orphan");
 	} finally {
 		rmSync(cacheDir, { recursive: true, force: true });
 	}

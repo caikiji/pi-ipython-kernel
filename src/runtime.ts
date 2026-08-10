@@ -147,6 +147,14 @@ export class RuntimeManager {
 			if (Date.now() > deadline) {
 				throw new RuntimeError("another bootstrap appears stuck; remove the temp dir and retry");
 			}
+			// A temp dir whose owner died mid-bootstrap (SIGKILL, crash)
+			// would block every later caller for the whole poll window;
+			// reap it and bootstrap ourselves instead of waiting on a
+			// process that can never finish.
+			if (reapStaleBootstrapTemp(this.cacheDir)) {
+				this.onStage("reaped orphaned bootstrap temp dir");
+				break;
+			}
 			const winner = readState(statePath);
 			if (stateMatches(winner, this.manifest) && existsSync(venvPython(this.cacheDir))) {
 				this.onStage("runtime ready (concurrent bootstrap finished)");
@@ -246,6 +254,48 @@ function hasBootstrapTemp(cacheDir: string): boolean {
 		return readdirSync(cacheDir).some((e) => e.startsWith(".tmp-"));
 	} catch {
 		return false;
+	}
+}
+
+/** Remove bootstrap temp dirs whose owner process no longer exists.
+ * Returns true when at least one was removed. Live owners are kept so
+ * genuine concurrent bootstraps are still waited on (see ensure()). */
+function reapStaleBootstrapTemp(cacheDir: string): boolean {
+	if (!existsSync(cacheDir)) return false;
+	let names: string[];
+	try {
+		names = readdirSync(cacheDir).filter((e) => e.startsWith(".tmp-"));
+	} catch {
+		return false;
+	}
+	let reaped = false;
+	for (const name of names) {
+		const pid = Number.parseInt(name.slice(".tmp-".length), 10);
+		if (Number.isInteger(pid) && pid > 0 && isProcessAlive(pid)) {
+			continue; // live owner: genuine concurrent bootstrap
+		}
+		try {
+			rmSync(join(cacheDir, name), { recursive: true, force: true });
+			reaped = true;
+		} catch {
+			// best effort; the poll loop re-checks next second
+		}
+	}
+	return reaped;
+}
+
+function isProcessAlive(pid: number): boolean {
+	// process.kill(pid, 0) probes existence without delivering a signal.
+	// Windows cannot probe (signal 0 unsupported), so stay conservative
+	// and treat the owner as alive: the original wait behavior applies.
+	if (process.platform === "win32") return true;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		// ESRCH: no such process (orphan). EPERM: exists but owned by
+		// another user (still alive). Anything else: conservative "alive".
+		return (err as NodeJS.ErrnoException).code === "EPERM";
 	}
 }
 
