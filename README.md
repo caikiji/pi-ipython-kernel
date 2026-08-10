@@ -64,12 +64,13 @@ def load_sales(path="sales.csv"):
     return pd.read_csv(path)
 
 register("load_sales", load_sales, "Load sales data as DataFrame.")   # 显式
-@register("clean_df", description="Cleaned data ready for modeling.")  # 装饰器（描述缺省取 docstring 首行）
+@register("clean_df", "Cleaned data ready for modeling.")             # 装饰器（第二个位置参数即描述，缺省取 docstring 首行）
 def clean_df(df): ...
 register("raw_df", pd.read_csv("sales.csv"), "Raw sales data.")        # 纯数据也可注册
 ```
 
 - 签名（参数/默认值/返回标注）与数据摘要（df 给 shape/columns）自动提取；同名重复注册 = 覆盖（last-write-wins）
+- 装饰器形式第二个位置参数就是描述（`@register("name", "desc")`，也可用 `description=`）；**注册纯字符串数据请用显式形式**（`register("name", obj="...", description="...")` 或三参）——裸字符串位置参数会被当作描述
 - 注册名同时是普通会话变量，`kernel_run` 可直接引用；`register` 在 `kernel_run` 里也可用，但仅当前会话有效——**跨会话注册的唯一途径是 init 脚本**
 - 修改 init 脚本在**下一个会话**生效（脚本每次内核启动执行一次）
 - **安全**：init 脚本是"每次会话自动执行的项目代码"，本身不扩大内核权限（agent 本就有 `kernel_run` 任意执行权），但变更不可见；本扩展按内容 hash 跨会话检测，脚本新增/变化时在会话开头提示一次（状态存缓存目录，不落工作区）；`kernel_init.py` 提交前请自行审阅，只从可信来源 pull

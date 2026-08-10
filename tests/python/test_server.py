@@ -138,6 +138,39 @@ class ExecEngineTest(unittest.TestCase):
         )
         self.assertEqual(self.engine.registry_snapshot()[0]["description"], "Halves x.")
 
+    def test_register_decorator_positional_description(self):
+        self.run_ok(
+            "@register('h', 'Halves x.')\n"
+            "def h(x):\n"
+            "    \"\"\"Not used.\"\"\"\n"
+            "    return x / 2\n"
+        )
+        entry = self.engine.registry_snapshot()[0]
+        self.assertEqual(entry["name"], "h")
+        self.assertEqual(entry["kind"], "function")
+        self.assertEqual(entry["description"], "Halves x.")
+
+    def test_register_bare_string_is_decorator_not_data(self):
+        # A bare string in obj position means the decorator form: nothing
+        # is registered until the returned decorator is applied.
+        self.run_ok("deco = register('NAME', 'Acme')")
+        self.assertEqual(self.engine.registry_names(), set())
+        self.run_ok("deco(lambda: 1)")
+        entry = self.engine.registry_snapshot()[0]
+        self.assertEqual(entry["name"], "NAME")
+        self.assertEqual(entry["description"], "Acme")
+
+    def test_register_string_data_keyword_obj(self):
+        self.run_ok("register('NAME', obj='Acme', description='Company name.')")
+        entry = self.engine.registry_snapshot()[0]
+        self.assertEqual(entry["kind"], "data")
+        self.assertEqual(entry["detail"], "'Acme'")
+        self.assertEqual(entry["description"], "Company name.")
+
+    def test_register_rejects_mixed_positional_keyword_obj(self):
+        result = self.engine.run("register('k', 1, obj=2)")
+        self.assertIn("TypeError", result.error)
+
     def test_register_data_object(self):
         self.run_ok(
             "register('cfg', {'a': 1, 'b': [1, 2]}, 'Config dict.')\n"

@@ -64,6 +64,9 @@ _IPYTHON_RESERVED = frozenset({"In", "Out", "get_ipython", "exit", "quit", "open
 # agents from kernel_run (session-scoped only).
 _KERNEL_BUILTINS = frozenset({"register"})
 
+# Sentinel: distinguishes "obj not given" from obj=None in register().
+_UNSET = object()
+
 
 def _describe_registrable(obj) -> tuple[str, str, str]:
     """(kind, detail, doc) for a register() entry.
@@ -134,19 +137,48 @@ class Executor:
         """Registration DSL shared by init scripts and kernel_run.
 
         register(name, obj, description="")  -> registers obj, returns obj
-        @register(name, description="")      -> decorator; returns the function
-        description falls back to the docstring's first line.
+        @register(name, description="")      -> decorator; returns the fn
+        @register(name, "description")       -> decorator, positional description
+
+        The description falls back to the docstring's first line. A bare
+        string in obj position (positional, without description=) is taken
+        as the description — the documented decorator form; to register
+        string data explicitly, use obj= or a third positional argument:
+        register(name, obj="...", description="...").
         """
 
-        def register(name, obj=None, description=""):
-            if obj is None:
-                def deco(fn):
-                    self._do_register(name, fn, description)
-                    return fn
-                return deco
+        def deco(name, description):
+            def wrap(fn):
+                self._do_register(name, fn, description)
+                return fn
+
+            return wrap
+
+        def register(name, *args, obj=_UNSET, description=""):
+            if len(args) > 2:
+                raise TypeError(
+                    f"register() takes at most 3 positional arguments ({len(args) + 1} given)"
+                )
+            if args and obj is not _UNSET:
+                raise TypeError("register(): 'obj' given both positionally and as a keyword")
+            if len(args) == 2:
+                if description:
+                    raise TypeError(
+                        "register(): 'description' given both positionally and as a keyword"
+                    )
+                obj, description = args
+            elif len(args) == 1:
+                obj = args[0]
+            if args and isinstance(obj, str) and not description:
+                # @register(name, "desc"): a bare positional string is the
+                # description (decorator form), not the registered object.
+                return deco(name, obj)
+            if obj is _UNSET:
+                return deco(name, description)
             self._do_register(name, obj, description)
             return obj
 
+        register.__doc__ = type(self)._make_register.__doc__
         return register
 
     def _do_register(self, name: str, obj, description: str) -> None:
