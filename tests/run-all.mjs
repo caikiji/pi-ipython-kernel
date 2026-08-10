@@ -20,3 +20,4 @@ try {
 }
 
 await import("./kernel.test.mjs");
+await import("./runtime.test.mjs");

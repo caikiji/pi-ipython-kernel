@@ -1,0 +1,42 @@
+{
+  "$comment": "Runtime bootstrap manifest for the kernel service (see RULES.md). Version bumps and platform additions live HERE, never in code. uv is pinned with a fixed version; its integrity is verified against the official .sha256 file served next to the asset (or the sha256 field when present).",
+  "uv": {
+    "version": "0.9.28",
+    "base": "https://github.com/astral-sh/uv/releases/download/0.9.28",
+    "assets": {
+      "aarch64-apple-darwin": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.9.28/uv-aarch64-apple-darwin.tar.gz",
+        "archive": "tar.gz"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.9.28/uv-x86_64-apple-darwin.tar.gz",
+        "archive": "tar.gz"
+      },
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.9.28/uv-x86_64-unknown-linux-gnu.tar.gz",
+        "archive": "tar.gz"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.9.28/uv-aarch64-unknown-linux-gnu.tar.gz",
+        "archive": "tar.gz"
+      },
+      "x86_64-pc-windows-msvc": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.9.28/uv-x86_64-pc-windows-msvc.zip",
+        "archive": "zip"
+      },
+      "aarch64-pc-windows-msvc": {
+        "url": "https://github.com/astral-sh/uv/releases/download/0.9.28/uv-aarch64-pc-windows-msvc.zip",
+        "archive": "zip"
+      }
+    }
+  },
+  "python": {
+    "version": "3.13",
+    "deps": [
+      "ipython",
+      "numpy",
+      "pandas",
+      "pyarrow"
+    ]
+  }
+}
