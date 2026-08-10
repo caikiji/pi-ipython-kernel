@@ -31,6 +31,7 @@
 - 全局层对象存 SQLite BLOB，对象数据与元数据（名称、来源文件 hash、创建时间、版本号、描述）在同一事务提交；单对象默认上限 256MB，超限拒绝 publish
 - publish 冲突语义：同名并发发布 = last-write-wins + 返回 overwritten 提示（agent 场景避免卡死）；可选 expected_version 参数做乐观锁
 - 会话层（sessions/ 目录）物理隔离、即弃，不序列化、不跨上下文；进程崩溃留下的孤儿文件可清理
+- 重放层：代码/函数走重放不走快照——工作区 init 脚本（.kernel/init.py 本机 gitignore / kernel_init.py 项目根可提交）在每次会话进程启动时自动执行进会话命名空间；可审计、无序列化风险、天然免疫快照过期
 - 运行时：Python 3.13.x 固定，由 uv + python-build-standalone 引导（runtime.json 清单，固定版本 + SHA256 校验），首次使用内核工具时惰性下载到缓存目录，不依赖、不修改系统 Python；下载清单与代码分离，升版本只改清单
 - 代码、注释、以及 agent 可见的输出（工具返回文本、错误消息）一律纯英文 ASCII；中文只允许出现在用户文档（README/RULES.md）
 - 测试：Python 侧用标准库 unittest（零第三方依赖可跑）；TS 侧用 Node ≥22.18 原生类型剥离直接 import .ts（零 npm install 可跑）；被测试 import 的 .ts 顶层不得静态 import pi 运行时包
@@ -43,6 +44,7 @@
 - 快照过期：对象元数据记录来源文件 hash，ls/get 时校验；源文件变化 → 标记 invalid 并给出重建建议，不静默返回旧数据
 - 读永远新鲜：会话进程不缓存全局层对象（只缓存元数据版本号），WAL 下任何事务提交后立即可见
 - 会话层与全局层同名对象：会话层 shadow 全局层，不污染（写入会话层不改全局层）
+- init 脚本约定：必须幂等、轻量（每次会话启动都执行）；init 报告（路径/输出/错误/注册名）经 hello 响应返回，扩展在首次工具调用时提示一次
 - Python 进程生命周期：随 pi 会话退出而终止（会话结束清理）；进程内异常不得退出主循环，必须返回 error 响应
 - 内核工具超时（默认 30s）由 TS 侧强制，超时后进程应能继续服务（interrupt 语义），不能整体杀掉
 - 提交规范：conventional commits 风格 `type(scope): subject`——type 用 feat/fix/docs/refactor/chore/test，scope 用模块名（kernel/extensions/python/rules/docs/tests）；subject 用英文祈使句；一次提交 = 一个逻辑变更（一个功能、一个修复、一份文档），不攒批、不碎片化刷提交；提交前必须跑通 `npm test`（Python + Node 全绿）
