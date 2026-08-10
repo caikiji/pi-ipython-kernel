@@ -72,6 +72,13 @@ export class KernelProcess {
 		await client.call("hello", {}, { timeoutMs: this.opts.spawnTimeoutMs ?? 8_000 });
 	}
 
+	/** Generic RPC call (ls/get/publish). Errors surface as RpcError. */
+	async call<T = unknown>(method: string, params: unknown, timeoutMs = 30_000): Promise<T> {
+		await this.ensureStarted();
+		const res = await this.client!.call(method, params, { timeoutMs });
+		return res.result as T;
+	}
+
 	/** Execute code with interrupt-on-timeout semantics. */
 	async execute(code: string, timeoutMs = 30_000): Promise<{ timedOut: boolean; result?: ExecuteResult }> {
 		await this.ensureStarted();

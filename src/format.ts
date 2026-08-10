@@ -62,3 +62,89 @@ export function truncate(text: string, max: number): string {
 	if (text.length <= max) return text;
 	return text.slice(0, max) + `\n... [truncated ${text.length - max} chars]`;
 }
+
+// ------------------------------------------------------------ ls / get / publish
+
+export interface LsEntry {
+	name: string;
+	type: string;
+	size?: number;
+	version?: number;
+	description?: string;
+	created_at?: string;
+	valid?: boolean;
+	invalid_reason?: string | null;
+	"source_path"?: string | null;
+}
+
+export function formatLs(session: LsEntry[], global: LsEntry[], detail: boolean): string {
+	const parts: string[] = [];
+	if (session.length === 0 && global.length === 0) {
+		return "No objects. Define some with kernel_run, or load with kernel_get.";
+	}
+	if (session.length > 0) {
+		parts.push(`SESSION (${session.length}):` + lines(session.map((o) => lsLine(o, detail, "session"))));
+	}
+	if (global.length > 0) {
+		parts.push(`GLOBAL (${global.length}):` + lines(global.map((o) => lsLine(o, detail, "global"))));
+	}
+	return parts.join("\n\n");
+}
+
+function lsLine(o: LsEntry, detail: boolean, scope: string): string {
+	let line = `  ${o.name} (${o.type})`;
+	if (scope === "global" && o.version !== undefined) {
+		line += ` v${o.version}${o.size !== undefined ? `, ${fmtSize(o.size)}` : ""}`;
+	}
+	if (o.valid === false) {
+		line += `  [INVALID: ${o.invalid_reason ?? "stale"}]`;
+	}
+	if (detail) {
+		if (o.description) line += `\n      desc: ${o.description}`;
+		if (o.created_at) line += `\n      created: ${o.created_at}`;
+		if (o["source_path"]) line += `\n      source: ${o["source_path"]}`;
+	}
+	return line;
+}
+
+export interface GetResult {
+	name: string;
+	scope: "session" | "global";
+	type?: string;
+	version?: number;
+	summary?: string;
+	full?: string;
+	loaded?: boolean;
+	shadowed?: boolean;
+	invalid?: boolean;
+	invalid_reason?: string | null;
+	valid?: boolean;
+}
+
+export function formatGet(r: GetResult): string {
+	if (r.invalid) {
+		return `INVALID: ${r.name} is stale (${r.invalid_reason}). Rebuild it from its source and re-publish with kernel_publish, or pass force=true to retrieve the old data explicitly.`;
+	}
+	const head = r.scope === "session" ? `${r.name} (session, ${r.type ?? "?"}` : `${r.name} (global v${r.version ?? "?"}`;
+	const flags: string[] = [];
+	if (r.scope === "global" && r.loaded) flags.push("loaded into session");
+	if (r.shadowed) flags.push("shadows a global object with the same name");
+	const parts = [`${head}${flags.length > 0 ? ", " + flags.join(", ") : ""})`];
+	if (r.summary) parts.push(r.summary);
+	if (r.full) parts.push(`FULL:\n${r.full}`);
+	return parts.join("\n\n");
+}
+
+export function formatPublish(r: { name: string; version: number; overwritten: boolean }): string {
+	return `OK: published ${r.name} as v${r.version}${r.overwritten ? " (overwrote a previous version)" : ""}`;
+}
+
+function fmtSize(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+	return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function lines(items: string[]): string {
+	return "\n" + items.join("\n");
+}

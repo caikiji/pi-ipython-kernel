@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -17,7 +17,7 @@ const serverPath = resolve(root, "python/server.py");
 
 const { JsonRpcClient } = await import("../src/rpc.ts");
 const { KernelProcess } = await import("../src/kernelProcess.ts");
-const { formatExecuteResult, truncate } = await import("../src/format.ts");
+const { formatExecuteResult, truncate, formatLs, formatGet, formatPublish } = await import("../src/format.ts");
 
 let passed = 0;
 async function test(name, fn) {
@@ -67,6 +67,34 @@ await test("format: empty result", () => {
 await test("truncate: short passthrough", () => {
 	assert.equal(truncate("abc", 10), "abc");
 	assert.ok(truncate("abcdef", 3).endsWith("... [truncated 3 chars]"));
+});
+
+await test("format: ls with invalid flag", () => {
+	const text = formatLs(
+		[{ name: "x", type: "int" }],
+		[{ name: "df", type: "DataFrame", version: 2, size: 1024, valid: false, invalid_reason: "source changed" }],
+		false,
+	);
+	assert.match(text, /SESSION \(1\):/);
+	assert.match(text, /x \(int\)/);
+	assert.match(text, /df \(DataFrame\) v2, 1.0 KB/);
+	assert.match(text, /INVALID: source changed/);
+});
+
+await test("format: get global loaded", () => {
+	const text = formatGet({ name: "df", scope: "global", version: 3, loaded: true, summary: "DataFrame shape=(2,2)" });
+	assert.match(text, /df \(global v3, loaded into session\)/);
+	assert.match(text, /DataFrame shape=\(2,2\)/);
+});
+
+await test("format: get invalid suggests rebuild", () => {
+	const text = formatGet({ name: "df", scope: "global", invalid: true, invalid_reason: "source file changed" });
+	assert.match(text, /INVALID: df is stale/);
+	assert.match(text, /force=true/);
+});
+
+await test("format: publish result", () => {
+	assert.equal(formatPublish({ name: "cfg", version: 2, overwritten: true }), "OK: published cfg as v2 (overwrote a previous version)");
 });
 
 // ------------------------------------------------------------ rpc client
@@ -176,6 +204,123 @@ await test("kernel: graceful shutdown", async () => {
 	assert.equal(k.running, false);
 	await k.shutdown(); // idempotent
 	rmSync(wd, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------- global layer (M2)
+
+await test("kernel: publish, ls, get full roundtrip", async () => {
+	const wd = workspace();
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		await k.execute("import pandas as pd\ndf = pd.DataFrame({'a': [1, 2], 'b': ['x', 'y']})");
+		const pub = await k.call("publish", { name: "df", description: "demo frame" });
+		assert.equal(pub.version, 1);
+		assert.equal(pub.overwritten, false);
+		const ls = await k.call("ls", { scope: "global" });
+		assert.equal(ls.global.length, 1);
+		assert.equal(ls.global[0].name, "df");
+		assert.equal(ls.global[0].valid, true);
+		// session has same-name df: explicit global get covers it
+		const got = await k.call("get", { name: "df", scope: "global", summarize: true });
+		assert.equal(got.scope, "global");
+		assert.equal(got.loaded, true);
+		assert.equal(got.covered_session, true);
+		assert.match(got.summary, /DataFrame shape=\(2, 2\)/);
+		// loaded object usable in the session
+		const run = await k.execute("df.shape");
+		assert.match(run.result.output, /\(2, 2\)/);
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
+await test("kernel: shadow semantics (session wins on auto)", async () => {
+	const wd = workspace();
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		await k.execute("v = {'session': 1}");
+		await k.call("publish", { name: "v", description: "global copy" });
+		const got = await k.call("get", { name: "v" });
+		assert.equal(got.scope, "session");
+		assert.equal(got.shadowed, true);
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
+await test("kernel: stale source flags INVALID and blocks get", async () => {
+	const wd = workspace();
+	const src = resolve(wd, "data.csv");
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		writeFileSync(src, "a,b\n1,2\n");
+		await k.execute(`rows = open(${JSON.stringify(src)}).read()`);
+		await k.call("publish", { name: "rows", description: "raw csv text", source: src });
+		writeFileSync(src, "a,b\n1,3\n");
+		const ls = await k.call("ls", { scope: "global" });
+		assert.equal(ls.global[0].valid, false);
+		const got = await k.call("get", { name: "rows", scope: "global" });
+		assert.equal(got.invalid, true);
+		const forced = await k.call("get", { name: "rows", scope: "global", force: true });
+		assert.equal(forced.invalid, undefined);
+		assert.match(forced.summary, /a,b/);
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
+await test("kernel: publish rejects unsafe types and bad versions", async () => {
+	const wd = workspace();
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		await k.execute("f = lambda: 1");
+		let err = await k.call("publish", { name: "f", description: "lambda" }).catch((e) => e);
+		assert.ok(err instanceof Error);
+		assert.match(err.message, /not publishable/);
+		await k.execute("v = 1");
+		await k.call("publish", { name: "v", description: "one" });
+		err = await k.call("publish", { name: "v", description: "two", expected_version: 99 }).catch((e) => e);
+		assert.ok(err instanceof Error);
+		assert.match(err.message, /version conflict/);
+		// missing description
+		err = await k.call("publish", { name: "v", description: "" }).catch((e) => e);
+		assert.ok(err instanceof Error);
+		assert.match(err.message, /description is required/);
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
+await test("kernel: two processes share the global layer (SQLite lock)", async () => {
+	const wd = workspace();
+	const k1 = new KernelProcess({ serverPath, cwd: wd });
+	const k2 = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		await k1.execute("v = 1");
+		await k1.call("publish", { name: "v", description: "from k1" });
+		// k2 sees it (fresh read, WAL)
+		const ls2 = await k2.call("ls", { scope: "global" });
+		assert.equal(ls2.global.length, 1);
+		assert.equal(ls2.global[0].name, "v");
+		// k2 loads it into its own session
+		const got2 = await k2.call("get", { name: "v", scope: "global" });
+		assert.equal(got2.summary, "1");
+		// k1 publishes again: version bumps, k2 sees it
+		await k1.execute("v = 2");
+		const pub2 = await k1.call("publish", { name: "v", description: "from k1 again" });
+		assert.equal(pub2.version, 2);
+		assert.equal(pub2.overwritten, true);
+		const meta2 = await k2.call("ls", { scope: "global" });
+		assert.equal(meta2.global[0].version, 2);
+	} finally {
+		await k1.shutdown();
+		await k2.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
 });
 
 console.log(`\n${passed} tests passed`);

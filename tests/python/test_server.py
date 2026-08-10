@@ -6,6 +6,7 @@ Run: python3 -m unittest discover -s tests/python -p 'test_*.py'
 import os
 import signal
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "python"))
@@ -113,20 +114,91 @@ class IPythonEngineTest(unittest.TestCase):
 
 
 class RpcServerTest(unittest.TestCase):
+    def make_server(self):
+        return server.Server(server.ExecEngine(), tempfile.mkdtemp())
+
     def test_hello(self):
-        srv = server.Server(server.ExecEngine())
+        srv = self.make_server()
         self.assertEqual(srv.handle({"method": "hello"})["engine"], "exec")
 
     def test_execute_roundtrip(self):
-        srv = server.Server(server.ExecEngine())
+        srv = self.make_server()
         out = srv.handle({"method": "execute", "params": {"code": "a = 1"}})
         self.assertEqual(out["new"], [{"name": "a", "type": "int"}])
         out = srv.handle({"method": "execute", "params": {"code": "a"}})
         self.assertIn("1", out["output"])
 
     def test_unknown_method(self):
-        srv = server.Server(server.ExecEngine())
+        srv = self.make_server()
         self.assertIsNone(srv.handle({"method": "nope"}))
+
+    def test_ls_lists_session_and_global(self):
+        srv = self.make_server()
+        srv.handle({"method": "execute", "params": {"code": "x = 1"}})
+        out = srv.handle({"method": "ls", "params": {}})
+        self.assertEqual([o["name"] for o in out["session"]], ["x"])
+        self.assertEqual(out["global"], [])
+
+    def test_publish_get_roundtrip(self):
+        srv = self.make_server()
+        srv.handle({"method": "execute", "params": {"code": "v = {'k': 42}"}})
+        pub = srv.handle({"method": "publish", "params": {"name": "v", "description": "a dict"}})
+        self.assertEqual(pub, {"version": 1, "overwritten": False, "name": "v"})
+        got = srv.handle({"method": "get", "params": {"name": "v", "scope": "global"}})
+        self.assertEqual(got["scope"], "global")
+        self.assertTrue(got["loaded"])
+        self.assertIn("k", got["summary"])
+
+    def test_get_session_shadows_global(self):
+        srv = self.make_server()
+        srv.handle({"method": "execute", "params": {"code": "v = {'s': 1}"}})
+        srv.handle({"method": "publish", "params": {"name": "v", "description": "global"}})
+        got = srv.handle({"method": "get", "params": {"name": "v"}})
+        self.assertEqual(got["scope"], "session")
+        self.assertTrue(got["shadowed"])
+
+    def test_get_global_covers_session_name(self):
+        srv = self.make_server()
+        srv.handle({"method": "execute", "params": {"code": "v = {'session': 1}"}})
+        srv.handle({"method": "publish", "params": {"name": "v", "description": "global", "scope": "global"}})
+        got = srv.handle({"method": "get", "params": {"name": "v", "scope": "global"}})
+        self.assertEqual(got["scope"], "global")
+        self.assertTrue(got["covered_session"])
+    def test_publish_missing_session_object(self):
+        srv = self.make_server()
+        out = srv.handle({"method": "publish", "params": {"name": "nope", "description": "x"}})
+        self.assertEqual(out["error"]["code"], "not_found")
+
+    def test_publish_requires_description(self):
+        srv = self.make_server()
+        srv.handle({"method": "execute", "params": {"code": "v = 1"}})
+        out = srv.handle({"method": "publish", "params": {"name": "v", "description": ""}})
+        self.assertEqual(out["error"]["code"], "publish")
+
+    def test_publish_version_conflict(self):
+        srv = self.make_server()
+        srv.handle({"method": "execute", "params": {"code": "v = 1"}})
+        srv.handle({"method": "publish", "params": {"name": "v", "description": "one"}})
+        out = srv.handle({"method": "publish", "params": {"name": "v", "description": "two", "expected_version": 1}})
+        self.assertEqual(out["version"], 2)
+        self.assertTrue(out["overwritten"])
+        out = srv.handle({"method": "publish", "params": {"name": "v", "description": "three", "expected_version": 99}})
+        self.assertEqual(out["error"]["code"], "conflict")
+
+    def test_stale_object_not_loaded_without_force(self):
+        srv = self.make_server()
+        src = os.path.join(tempfile.mkdtemp(), "src.txt")
+        with open(src, "w") as f:
+            f.write("v1")
+        srv.handle({"method": "execute", "params": {"code": f"import builtins; data = builtins.open({src!r}).read()"}})
+        srv.handle({"method": "publish", "params": {"name": "data", "description": "file content", "source": src}})
+        with open(src, "w") as f:
+            f.write("v2")
+        out = srv.handle({"method": "get", "params": {"name": "data", "scope": "global"}})
+        self.assertTrue(out["invalid"])
+        out = srv.handle({"method": "get", "params": {"name": "data", "scope": "global", "force": True}})
+        self.assertEqual(out["valid"], False, "forced load still reports staleness")
+        self.assertEqual(out["summary"], "'v1'")
 
 
 if __name__ == "__main__":

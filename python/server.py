@@ -28,7 +28,6 @@ Design notes (see RULES.md):
 """
 
 from __future__ import annotations
-
 import ast
 import codeop
 import contextlib
@@ -39,6 +38,9 @@ import signal
 import sys
 import traceback
 from dataclasses import dataclass, field
+
+import storage
+import summarize
 
 VERSION = "0.1.0"
 
@@ -108,6 +110,25 @@ class Executor:
 
     def _execute(self, code: str, result: ExecResult) -> None:
         raise NotImplementedError
+
+    # -- session namespace access (used by ls/get/publish) ----------------
+
+    def session_snapshot(self) -> list[dict]:
+        """Public top-level names of the session namespace."""
+        return [
+            {"name": k, "type": type(v).__name__}
+            for k, v in self._ns.items()
+            if not _PRIVATE(k)
+        ]
+
+    def has(self, name: str) -> bool:
+        return name in self._ns
+
+    def get(self, name: str):
+        return self._ns[name]
+
+    def set(self, name: str, value) -> None:
+        self._ns[name] = value
 
 
 class ExecEngine(Executor):
@@ -189,16 +210,33 @@ def make_executor() -> Executor:
 
 
 class Server:
-    def __init__(self, executor: Executor) -> None:
+    def __init__(self, executor: Executor, workspace: str) -> None:
         self.executor = executor
+        self.store = storage.GlobalStore(workspace)
 
     def handle(self, msg: dict) -> dict | None:
         method = msg.get("method")
         params = msg.get("params") or {}
+        try:
+            return self._dispatch(method, params)
+        except storage.ConflictError as exc:
+            return {"error": {"code": "conflict", "message": str(exc)}}
+        except storage.PublishError as exc:
+            return {"error": {"code": "publish", "message": str(exc)}}
+        except KeyError as exc:
+            return {"error": {"code": "not_found", "message": str(exc)}}
+
+    def _dispatch(self, method: str, params: dict) -> dict | None:
         if method == "hello":
             return {"version": VERSION, "python": sys.version.split()[0], "engine": self.executor.name}
         if method == "execute":
             return self.handle_execute(str(params.get("code", "")))
+        if method == "ls":
+            return self.handle_ls(params)
+        if method == "get":
+            return self.handle_get(params)
+        if method == "publish":
+            return self.handle_publish(params)
         if method == "shutdown":
             os._exit(0)
         return None
@@ -215,6 +253,84 @@ class Server:
             "removed": result.removed,
         }
 
+    # -- global layer ---------------------------------------------------
+
+    def handle_ls(self, params: dict) -> dict:
+        scope = params.get("scope", "all")
+        pattern = params.get("pattern") or None
+        out: dict = {}
+        if scope in ("all", "session"):
+            out["session"] = [
+                o for o in self.executor.session_snapshot() if pattern is None or _match_name(pattern, o["name"])
+            ]
+        if scope in ("all", "global"):
+            out["global"] = self.store.list_objects(pattern)
+        return out
+
+    def handle_get(self, params: dict) -> dict:
+        name = str(params.get("name", ""))
+        want_summary = bool(params.get("summarize", True))
+        scope = str(params.get("scope", "auto"))
+        force = bool(params.get("force", False))
+
+        if scope == "session" or (scope == "auto" and self.executor.has(name)):
+            obj = self.executor.get(name)
+            meta = {
+                "name": name,
+                "scope": "session",
+                "type": type(obj).__name__,
+                "valid": True,
+                "shadowed": self.store.get_meta(name) is not None,
+            }
+            return self._get_result(meta, obj, want_summary)
+
+        covered_session = False
+        if self.executor.has(name):
+            # Explicit global request overwrites a same-name session
+            # variable (e.g. verifying right after publish); the old
+            # session value is replaced by the loaded global one.
+            covered_session = True
+        meta = self.store.get_meta(name)
+        if meta is None:
+            raise KeyError(f"no object named {name!r} in session or global layer")
+        if not meta["valid"] and not force:
+            return {"invalid": True, "invalid_reason": meta["invalid_reason"], "meta": meta}
+        _, obj = self.store.load(name, force=force)
+        self.executor.set(name, obj)
+        meta["scope"] = "global"
+        meta["loaded"] = True
+        if covered_session:
+            meta["covered_session"] = True
+        return self._get_result(meta, obj, want_summary)
+
+    def _get_result(self, meta: dict, obj: Any, want_summary: bool) -> dict:
+        out = dict(meta)
+        out["summary"] = summarize.summarize(obj) if want_summary else ""
+        if not want_summary:
+            out["full"] = summarize.full_text(obj)
+        return out
+
+    def handle_publish(self, params: dict) -> dict:
+        name = str(params.get("name", ""))
+        description = str(params.get("description", ""))
+        source = params.get("source") or None
+        expected_version = params.get("expected_version")
+        if not self.executor.has(name):
+            raise KeyError(f"no session object named {name!r} to publish (define it with kernel_run first)")
+        obj = self.executor.get(name)
+        result = self.store.publish(
+            name, obj, description=description, source=source,
+            expected_version=int(expected_version) if expected_version is not None else None,
+        )
+        result["name"] = name
+        return result
+
+
+def _match_name(pattern: str, name: str) -> bool:
+    import fnmatch
+
+    return fnmatch.fnmatchcase(name, pattern)
+
 
 def main() -> None:
     # Default SIGINT handling: the host sends SIGINT on timeout, which
@@ -222,7 +338,7 @@ def main() -> None:
     # reported as interrupted). Any KeyboardInterrupt landing in the main
     # loop (e.g. while blocked on readline) is swallowed so the process
     # keeps serving.
-    server = Server(make_executor())
+    server = Server(make_executor(), os.getcwd())
     stdin = sys.stdin.buffer
     stdout = sys.stdout.buffer
     while True:
@@ -239,7 +355,10 @@ def main() -> None:
                 result = server.handle(msg)
                 if result is None and rid is not None:
                     result = {'ok': True}
-                payload = {'id': rid, 'result': result} if rid is not None else None
+                if isinstance(result, dict) and isinstance(result.get('error'), dict):
+                    payload = {'id': rid, 'error': result['error']} if rid is not None else None
+                else:
+                    payload = {'id': rid, 'result': result} if rid is not None else None
             except Exception as exc:  # noqa: BLE001
                 payload = {'id': rid, 'error': {'code': 'internal', 'message': str(exc)}}
             if payload is not None:
