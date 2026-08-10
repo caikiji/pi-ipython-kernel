@@ -93,6 +93,19 @@ await test("format: get invalid suggests rebuild", () => {
 	assert.match(text, /force=true/);
 });
 
+await test("format: get full is truncated", () => {
+	const text = formatGet({ name: "big", scope: "global", version: 1, full: "y".repeat(100_000) });
+	assert.match(text, /truncated/);
+});
+
+await test("format: truncated output flagged", () => {
+	const text = formatExecuteResult(
+		{ output: "lots", error: "", incomplete: false, interrupted: false, output_truncated: true, new: [], changed: [], removed: [] },
+		false,
+	);
+	assert.match(text, /output was truncated/);
+});
+
 await test("format: publish result", () => {
 	assert.equal(formatPublish({ name: "cfg", version: 2, overwritten: true }), "OK: published cfg as v2 (overwrote a previous version)");
 });
@@ -289,6 +302,40 @@ await test("kernel: publish rejects unsafe types and bad versions", async () => 
 		err = await k.call("publish", { name: "v", description: "" }).catch((e) => e);
 		assert.ok(err instanceof Error);
 		assert.match(err.message, /description is required/);
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
+await test("kernel: concurrent executes are serialized", async () => {
+	const wd = workspace();
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		// Fire two executes concurrently: the second must run after the
+		// first (mutex queue), so it sees variables the first created.
+		const [slow, fast] = await Promise.all([
+			k.execute("import time\ntime.sleep(0.5)\nshared = 1"),
+			k.execute("shared"),
+		]);
+		assert.equal(slow.result.error, "");
+		assert.match(fast.result.output, /1/, "second call ran after the first and sees its variable");
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
+await test("kernel: failed execute does not poison the queue", async () => {
+	const wd = workspace();
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		const [bad, good] = await Promise.all([
+			k.execute("raise ValueError('boom')"),
+			k.execute("1 + 1"),
+		]);
+		assert.match(bad.result.error, /ValueError/);
+		assert.match(good.result.output, /2/, "second call unaffected by the failed one");
 	} finally {
 		await k.shutdown();
 		rmSync(wd, { recursive: true, force: true });
