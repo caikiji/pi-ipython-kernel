@@ -191,6 +191,32 @@ class GlobalStoreTest(unittest.TestCase):
         names = [o["name"] for o in self.store.list_objects("df_*")]
         self.assertEqual(names, ["df_a", "df_b"])
 
+    def test_delete_removes_object(self):
+        self.store.publish("x", 1, description="one")
+        self.assertEqual(self.store.delete("x"), {"deleted": True, "version": 1})
+        self.assertIsNone(self.store.get_meta("x"))
+        self.assertEqual(self.store.list_objects(), [])
+
+    def test_delete_missing_is_idempotent(self):
+        self.assertEqual(self.store.delete("nope"), {"deleted": False, "version": None})
+        self.assertEqual(self.store.delete("nope"), {"deleted": False, "version": None})
+
+    def test_delete_with_expected_version(self):
+        self.store.publish("x", 1, description="one")
+        with self.assertRaises(storage.ConflictError):
+            self.store.delete("x", expected_version=99)
+        self.assertTrue(self.store.get_meta("x"), "conflict must not delete")
+        self.assertEqual(self.store.delete("x", expected_version=1), {"deleted": True, "version": 1})
+
+    def test_delete_resets_version_to_v1(self):
+        self.store.publish("x", 1, description="one")
+        self.store.publish("x", 2, description="two")
+        self.store.delete("x")
+        self.assertEqual(self.store.publish("x", 3, description="three"), {"version": 1, "overwritten": False})
+
+    def test_delete_invalid_name(self):
+        with self.assertRaises(PublishError):
+            self.store.delete("_x")
     def test_concurrent_publish_from_two_connections(self):
         """Two connections (two sessions) publishing concurrently: SQLite
         serializes writers; both writes must survive (last-write-wins)."""

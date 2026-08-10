@@ -17,8 +17,7 @@ const serverPath = resolve(root, "python/server.py");
 
 const { JsonRpcClient } = await import("../src/rpc.ts");
 const { KernelProcess } = await import("../src/kernelProcess.ts");
-const { formatExecuteResult, truncate, formatLs, formatGet, formatPublish } = await import("../src/format.ts");
-
+const { formatExecuteResult, truncate, formatLs, formatGet, formatPublish, formatDelete } = await import("../src/format.ts");
 let passed = 0;
 async function test(name, fn) {
 	try {
@@ -108,6 +107,11 @@ await test("format: truncated output flagged", () => {
 
 await test("format: publish result", () => {
 	assert.equal(formatPublish({ name: "cfg", version: 2, overwritten: true }), "OK: published cfg as v2 (overwrote a previous version)");
+});
+
+await test("format: delete result", () => {
+	assert.equal(formatDelete({ name: "cfg", deleted: true, version: 2 }), "OK: deleted cfg (was v2)");
+	assert.equal(formatDelete({ name: "cfg", deleted: false, version: null }), "OK: cfg is not in the global layer (nothing to delete)");
 });
 
 // ------------------------------------------------------------ rpc client
@@ -403,6 +407,53 @@ await test("kernel: two processes share the global layer (SQLite lock)", async (
 	}
 });
 
+await test("kernel: delete removes global object, idempotent, version resets", async () => {
+	const wd = workspace();
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		await k.execute("v = 1");
+		await k.call("publish", { name: "v", description: "one" });
+		await k.execute("v = 2");
+		await k.call("publish", { name: "v", description: "two" });
+		const del = await k.call("delete", { name: "v" });
+		assert.equal(del.deleted, true);
+		assert.equal(del.version, 2);
+		const ls = await k.call("ls", { scope: "global" });
+		assert.equal(ls.global.length, 0, "object gone from the global layer");
+		// idempotent: second delete is not an error
+		const del2 = await k.call("delete", { name: "v" });
+		assert.equal(del2.deleted, false);
+		assert.equal(del2.version, null);
+		// re-publish starts at version 1
+		const pub = await k.call("publish", { name: "v", description: "three" });
+		assert.equal(pub.version, 1);
+		assert.equal(pub.overwritten, false);
+		// optimistic lock: mismatch refuses to delete
+		const err = await k.call("delete", { name: "v", expected_version: 99 }).catch((e) => e);
+		assert.ok(err instanceof Error);
+		assert.match(err.message, /version conflict/);
+		const ls2 = await k.call("ls", { scope: "global" });
+		assert.equal(ls2.global.length, 1, "conflict must not delete");
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
+await test("kernel: delete does not touch same-name session variable", async () => {
+	const wd = workspace();
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		await k.execute("v = 1");
+		await k.call("publish", { name: "v", description: "global" });
+		await k.call("delete", { name: "v" });
+		const r = await k.execute("v");
+		assert.match(r.result.output, /1/, "session variable survives global delete");
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
 // ---------------------------------------------------------- kernel session
 
 const { KernelSession } = await import("../src/kernelSession.ts");

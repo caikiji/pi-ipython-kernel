@@ -7,7 +7,7 @@
 会话 B: kernel_ls 发现 df → kernel_get 取回 → kernel_run 直接用
 ```
 
-## 四个工具
+## 五个工具
 
 | 工具 | 频率 | 作用 |
 |---|---|---|
@@ -15,8 +15,9 @@
 | `kernel_ls(scope?, pattern?, detail?)` | 会话开场 | 列出会话层变量 + 全局层对象（含版本/大小/过期标记） |
 | `kernel_get(name, summarize?, scope?, force?)` | 取结果 | 取对象摘要（或全量），全局对象自动注入会话命名空间 |
 | `kernel_publish(name, description, source?, expected_version?)` | 交接 | 发布会话对象到全局层，强制描述，可带源文件做过期校验 |
+| `kernel_delete(name, expected_version?)` | 清理 | 删除全局层对象，幂等（不存在不报错），可带版本乐观锁；会话变量不受影响 |
 
-设计原则：**低频功能降级为参数，不升格为工具**——validate/describe/load/status 全部内嵌在 ls/get 的行为里，工具面保持 4 个。
+设计原则：**低频功能降级为参数，不升格为工具**——validate/describe/load/status 全部内嵌在 ls/get 的行为里；delete 是 publish 的对称生命周期操作，与发布同等地位，故独立成工具。
 
 ## 架构
 
@@ -112,6 +113,7 @@ tests/                 # tests/python/*.py + tests/*.test.mjs
 - [x] M0 骨架
 - [x] M1 kernel_run（exec 引擎 + 差异报告 + 中断语义）
 - [x] M2 kernel_ls/get/publish + SQLite 全局层（跨会话持久化）
+- [x] M5 kernel_delete：全局层删除（幂等 + 版本乐观锁 + 删除后版本重置 v1）
 - [x] M4 托管运行时引导（uv + python-build-standalone）
 - [x] IPython 引擎接入（magics/rich repr，ANSI 清理 + 保留名过滤）
 - [x] 重放层：工作区 init 脚本（.kernel/init.py / kernel_init.py）启动时自动执行

@@ -335,6 +335,30 @@ class GlobalStore:
                 (name, format_name, check_type(obj), sqlite3.Binary(blob), len(blob), version, description, source, source_hash, created_at),
             )
         return {"version": version, "overwritten": row is not None}
+    def delete(self, name: str, expected_version: int | None = None) -> dict:
+        """Delete a global-layer object. Idempotent: deleting a missing
+        object returns deleted=False instead of raising. Pass
+        expected_version for an optimistic lock (mismatch raises
+        ConflictError). The row is removed entirely, so a later publish
+        of the same name starts at version 1 again.
+        """
+        if not _NAME_RE.match(name) or name.startswith("_"):
+            raise PublishError(
+                f"invalid object name {name!r}: use letters/digits/._- and do not start with '_'"
+            )
+        with self.conn:
+            row = self.conn.execute(
+                "SELECT version FROM objects WHERE name = ?", (name,)
+            ).fetchone()
+            if row is None:
+                return {"deleted": False, "version": None}
+            version = row[0]
+            if expected_version is not None and version != expected_version:
+                raise ConflictError(
+                    f"version conflict: expected {expected_version}, current {version} (re-read with ls first)"
+                )
+            self.conn.execute("DELETE FROM objects WHERE name = ?", (name,))
+        return {"deleted": True, "version": version}
 
     def list_objects(self, pattern: str | None = None) -> list[dict]:
         rows = self.conn.execute(

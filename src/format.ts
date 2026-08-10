@@ -142,6 +142,19 @@ export function formatPublish(r: { name: string; version: number; overwritten: b
 	return `OK: published ${r.name} as v${r.version}${r.overwritten ? " (overwrote a previous version)" : ""}`;
 }
 
+export interface DeleteResult {
+	name: string;
+	deleted: boolean;
+	version?: number | null;
+}
+
+export function formatDelete(r: DeleteResult): string {
+	if (!r.deleted) {
+		return `OK: ${r.name} is not in the global layer (nothing to delete)`;
+	}
+	return `OK: deleted ${r.name} (was v${r.version ?? "?"})`;
+}
+
 function fmtSize(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
 	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;

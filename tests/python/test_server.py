@@ -224,6 +224,36 @@ class RpcServerTest(unittest.TestCase):
         out = srv.handle({"method": "publish", "params": {"name": "nope", "description": "x"}})
         self.assertEqual(out["error"]["code"], "not_found")
 
+    def test_delete_roundtrip(self):
+        srv = self.make_server()
+        srv.handle({"method": "execute", "params": {"code": "v = 1"}})
+        srv.handle({"method": "publish", "params": {"name": "v", "description": "d"}})
+        out = srv.handle({"method": "delete", "params": {"name": "v"}})
+        self.assertEqual(out, {"name": "v", "deleted": True, "version": 1})
+        ls = srv.handle({"method": "ls", "params": {"scope": "global"}})
+        self.assertEqual(ls["global"], [])
+
+    def test_delete_missing_is_idempotent(self):
+        srv = self.make_server()
+        out = srv.handle({"method": "delete", "params": {"name": "nope"}})
+        self.assertEqual(out, {"name": "nope", "deleted": False, "version": None})
+
+    def test_delete_version_conflict(self):
+        srv = self.make_server()
+        srv.handle({"method": "execute", "params": {"code": "v = 1"}})
+        srv.handle({"method": "publish", "params": {"name": "v", "description": "d"}})
+        out = srv.handle({"method": "delete", "params": {"name": "v", "expected_version": 99}})
+        self.assertEqual(out["error"]["code"], "conflict")
+        ls = srv.handle({"method": "ls", "params": {"scope": "global"}})
+        self.assertEqual(len(ls["global"]), 1, "conflict must not delete")
+
+    def test_delete_does_not_touch_session(self):
+        srv = self.make_server()
+        srv.handle({"method": "execute", "params": {"code": "v = 1"}})
+        srv.handle({"method": "publish", "params": {"name": "v", "description": "d"}})
+        srv.handle({"method": "delete", "params": {"name": "v"}})
+        out = srv.handle({"method": "execute", "params": {"code": "v"}})
+        self.assertIn("1", out["output"], "session variable survives global delete")
     def test_publish_requires_description(self):
         srv = self.make_server()
         srv.handle({"method": "execute", "params": {"code": "v = 1"}})

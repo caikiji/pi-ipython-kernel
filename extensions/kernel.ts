@@ -12,8 +12,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { KernelSession } from "../src/kernelSession.ts";
-import { formatExecuteResult, formatGet, formatLs, formatPublish, type GetResult, type LsEntry } from "../src/format.ts";
+import { formatExecuteResult, formatDelete, formatGet, formatLs, formatPublish, type GetResult, type LsEntry } from "../src/format.ts";
 export default function kernelExtension(pi: ExtensionAPI) {
 	// python/server.py and runtime.json sit next to the package, one level
 	// above extensions/.
@@ -168,6 +167,37 @@ export default function kernelExtension(pi: ExtensionAPI) {
 			return {
 				content: [{ type: "text", text: session.warningText() + formatPublish(res) }],
 				details: { tool: "kernel_publish", name: params.name, version: res.version, overwritten: res.overwritten },
+			};
+		},
+	});
+
+	// ------------------------------------------------------------ kernel_delete
+
+	pi.registerTool({
+		name: "kernel_delete",
+		label: "Kernel Delete",
+		description:
+			"Delete a published object from the workspace-global layer so other sessions can no longer load it with kernel_get. Idempotent: deleting a missing object reports 'nothing to delete' instead of failing. Pass expected_version to require that a specific version is deleted (optimistic lock). Session variables are not affected; remove those with kernel_run (del name).",
+		promptSnippet: "Delete a published global kernel object",
+		promptGuidelines: [
+			"Use kernel_delete to clean up the global layer: remove stale snapshots, accidental publishes, or test leftovers so kernel_ls stays small and current.",
+			"Deleting is idempotent and safe to retry: deleting an object that does not exist reports 'nothing to delete', not an error.",
+			"Pass expected_version to delete only a specific version (e.g. when another session may have updated the object); a mismatch reports a conflict instead of deleting.",
+			"kernel_delete only affects the global layer. To remove a session variable, use kernel_run (del name).",
+		],
+		parameters: Type.Object({
+			name: Type.String({ description: "Object name to delete from the global layer." }),
+			expected_version: Type.Optional(Type.Number({ description: "Require this version to be the one deleted (optimistic lock)." })),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const proc = await session.get(ctx.cwd, stage(_onUpdate));
+			const res = (await proc.call("delete", {
+				name: params.name,
+				expected_version: params.expected_version ?? null,
+			})) as { name: string; deleted: boolean; version: number | null };
+			return {
+				content: [{ type: "text", text: session.warningText() + formatDelete(res) }],
+				details: { tool: "kernel_delete", name: params.name, deleted: res.deleted, version: res.version ?? null },
 			};
 		},
 	});

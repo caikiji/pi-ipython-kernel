@@ -10,8 +10,12 @@ Methods:
   hello            -> {version, python, engine}
   execute {code}   -> {output, error, incomplete, interrupted,
                        new: [{name, type}], changed: [name], removed: [name]}
+  ls {scope, pattern}                        -> {session, global}
+  get {name, summarize, scope, force}        -> object meta + summary/full
+  publish {name, description, source, expected_version}
+                   -> {name, version, overwritten}
+  delete {name, expected_version}            -> {name, deleted, version}
   shutdown         -> exits the process
-
 Design notes (see RULES.md):
 - Executor is an abstraction: IPython InteractiveShell when available,
   standard-library exec engine as the zero-dependency fallback.
@@ -268,6 +272,8 @@ class Server:
             return self.handle_get(params)
         if method == "publish":
             return self.handle_publish(params)
+        if method == "delete":
+            return self.handle_delete(params)
         if method == "shutdown":
             os._exit(0)
         return None
@@ -361,6 +367,17 @@ class Server:
         )
         result["name"] = name
         return result
+
+    def handle_delete(self, params: dict) -> dict:
+        name = str(params.get("name", ""))
+        expected_version = params.get("expected_version")
+        result = self.store.delete(
+            name,
+            expected_version=int(expected_version) if expected_version is not None else None,
+        )
+        result["name"] = name
+        return result
+
 
 
 def _match_name(pattern: str, name: str) -> bool:
