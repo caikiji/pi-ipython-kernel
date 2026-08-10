@@ -101,7 +101,9 @@ class ExecEngineTest(unittest.TestCase):
         self.run_ok("register('probe', lambda: 1, 'probe')")
         self.assertIn("probe", self.engine.registry_names())
         self.assertNotIn("register", {o["name"] for o in self.engine.session_snapshot()})
+        self.assertNotIn("unregister", {o["name"] for o in self.engine.session_snapshot()})
         self.assertNotIn("register", self.engine.run("x = 1").new + self.engine.run("y = 2").new)
+        self.assertNotIn("unregister", self.engine.run("x = 1").new + self.engine.run("y = 2").new)
 
     def test_register_explicit_function(self):
         self.run_ok(
@@ -192,6 +194,29 @@ class ExecEngineTest(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["description"], "second")
 
+    def test_register_overwrite_notice(self):
+        first = self.engine.run("register('k', 1, 'first')")
+        second = self.engine.run("register('k', 2, 'second')")
+        self.assertNotIn("overwrote", first.output)
+        self.assertIn("overwrote existing entry 'k'", second.output)
+        self.assertIn("was data, now data", second.output)
+
+    def test_unregister_drops_entry_and_binding(self):
+        self.run_ok("register('k', 1, 'first')\nunregister('k')")
+        self.assertEqual(self.engine.registry_names(), set())
+        self.assertFalse(self.engine.has("k"))
+
+    def test_unregister_idempotent(self):
+        self.run_ok("register('k', 1, 'first')")
+        result = self.engine.run("unregister('k')\nunregister('k')")
+        self.assertEqual(result.error, "")
+        self.assertEqual(self.engine.registry_names(), set())
+
+    def test_unregister_keeps_user_reassignment(self):
+        self.run_ok("register('k', 1, 'first')\nk = 99\nunregister('k')")
+        self.assertEqual(self.engine.registry_names(), set())
+        self.assertEqual(self.engine.get("k"), 99)
+
     def test_register_callable_object(self):
         self.engine.set("_adder", type("Adder", (), {"__call__": lambda self, a, b: a + b})())
         self.engine.run("register('adder', _adder, 'callable instance')")
@@ -217,6 +242,9 @@ class IPythonEngineTest(unittest.TestCase):
         result = self.engine.run("register('ip', lambda: 1, 'ipython probe')")
         self.assertEqual(result.error, "")
         self.assertIn("ip", self.engine.registry_names())
+        result = self.engine.run("unregister('ip')")
+        self.assertEqual(result.error, "")
+        self.assertNotIn("ip", self.engine.registry_names())
 
 class RpcServerTest(unittest.TestCase):
     def make_server(self):
@@ -291,6 +319,11 @@ class RpcServerTest(unittest.TestCase):
         out = srv.handle({"method": "execute", "params": {"code": "double(CONST)"}})
         self.assertIn("84", out["output"])
 
+    def test_init_script_overwrite_notice(self):
+        srv = self.init_server("register('k', 1, 'first')\nregister('k', 2, 'second')")
+        init = srv.handle({"method": "hello"})["init"]
+        self.assertIn("overwrote existing entry 'k'", init["output"])
+
     def test_ls_includes_registered(self):
         srv = self.make_server()
         srv.handle({"method": "execute", "params": {"code": "register('cfg', {'a': 1}, 'Config.')"}})
@@ -302,6 +335,15 @@ class RpcServerTest(unittest.TestCase):
         # pattern filters registered entries too
         ls2 = srv.handle({"method": "ls", "params": {"scope": "session", "pattern": "nomatch*"}})
         self.assertEqual(ls2["registered"], [])
+
+    def test_unregister_reflected_in_ls(self):
+        srv = self.make_server()
+        srv.handle(
+            {"method": "execute", "params": {"code": "register('cfg', {'a': 1}, 'Config.')\nunregister('cfg')"}}
+        )
+        ls = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        self.assertEqual(ls["registered"], [])
+        self.assertNotIn("cfg", {o["name"] for o in ls["session"]})
     def test_init_script_error_reported(self):
         srv = self.init_server("raise ValueError('bad init')")
         init = srv.handle({"method": "hello"})["init"]

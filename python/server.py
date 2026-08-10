@@ -60,9 +60,9 @@ _PRIVATE = lambda name: name.startswith("_")  # noqa: E731
 _IPYTHON_RESERVED = frozenset({"In", "Out", "get_ipython", "exit", "quit", "open"})
 
 # Names the kernel injects into the session namespace; never listed as user
-# objects. `register` is the registration DSL used by init scripts and by
-# agents from kernel_run (session-scoped only).
-_KERNEL_BUILTINS = frozenset({"register"})
+# objects. `register`/`unregister` form the registration DSL used by init
+# scripts and by agents from kernel_run (session-scoped only).
+_KERNEL_BUILTINS = frozenset({"register", "unregister"})
 
 # Sentinel: distinguishes "obj not given" from obj=None in register().
 _UNSET = object()
@@ -125,12 +125,17 @@ class Executor:
         # Registry of named callables/data declared via register() (replay
         # layer: rebuilt from the init script on every session start).
         self._registry: dict[str, dict] = {}
+        # Registered objects (parallel to _registry, for identity checks in
+        # unregister) and notices surfaced in the next run() output.
+        self._registry_objs: dict[str, object] = {}
+        self._notices: list[str] = []
 
     # -- namespace ----------------------------------------------------
 
     def _new_namespace(self) -> dict:
         ns = {"__name__": "__kernel__"}
         ns["register"] = self._make_register()
+        ns["unregister"] = self._make_unregister()
         return ns
 
     def _make_register(self):
@@ -144,7 +149,9 @@ class Executor:
         string in obj position (positional, without description=) is taken
         as the description — the documented decorator form; to register
         string data explicitly, use obj= or a third positional argument:
-        register(name, obj="...", description="...").
+        register(name, obj="...", description="..."). Re-registering an
+        existing name overwrites it (last-write-wins) with a notice in the
+        run output; unregister(name) drops an entry (idempotent, session-only).
         """
 
         def deco(name, description):
@@ -179,10 +186,35 @@ class Executor:
             return obj
 
         register.__doc__ = type(self)._make_register.__doc__
+
         return register
+
+    def _make_unregister(self):
+        """Registration DSL shared by init scripts and kernel_run.
+
+        unregister(name)  -> True if an entry was removed, False if absent
+        (idempotent). Drops the entry from the REGISTERED section and, when
+        the session binding is still the registered object, from the
+        session namespace — a later user assignment to the same name
+        survives. Session-only: the init script re-registers entries on
+        the next session start.
+        """
+
+        def unregister(name: str) -> bool:
+            if name not in self._registry:
+                return False
+            obj = self._registry_objs.pop(name, None)
+            self._registry.pop(name)
+            if self._ns.get(name) is obj:
+                del self._ns[name]
+            return True
+
+        unregister.__doc__ = type(self)._make_unregister.__doc__
+        return unregister
 
     def _do_register(self, name: str, obj, description: str) -> None:
         kind, detail, doc = _describe_registrable(obj)
+        previous = self._registry.get(name)
         self._registry[name] = {
             "name": name,
             "kind": kind,
@@ -190,10 +222,15 @@ class Executor:
             "detail": detail,
             "doc": doc,
         }
+        self._registry_objs[name] = obj
         # Registered names are usable in the session namespace (direct
         # calls/references); ls hides them from the SESSION section because
         # the REGISTERED section already shows them.
         self._ns[name] = obj
+        if previous is not None:
+            self._notices.append(
+                f"register: overwrote existing entry {name!r} (was {previous['kind']}, now {kind})"
+            )
 
     def registry_names(self) -> set[str]:
         return set(self._registry)
@@ -238,6 +275,14 @@ class Executor:
         result.output = out.getvalue()
         if err.getvalue() and not result.error:
             result.output += err.getvalue()
+        if self._notices:
+            # DSL notices (e.g. register() overwrites) ride along with the
+            # run output so the agent sees them in the tool result.
+            notice_block = "\n".join(self._notices)
+            self._notices.clear()
+            if result.output and not result.output.endswith("\n"):
+                result.output += "\n"
+            result.output += notice_block + "\n"
         if not result.error and not result.interrupted:
             result.new, result.changed, result.removed = self._diff(before)
         return result
@@ -331,6 +376,7 @@ class IPythonEngine(Executor):
         # Re-inject the registration DSL: base-class namespace is replaced
         # by the shell's user_ns above.
         self._ns["register"] = self._make_register()
+        self._ns["unregister"] = self._make_unregister()
 
     def _execute(self, code: str, result: ExecResult) -> None:
         from IPython.core.error import InputRejected
