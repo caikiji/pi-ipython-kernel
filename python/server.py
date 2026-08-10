@@ -294,7 +294,7 @@ class Server:
         if meta is None:
             raise KeyError(f"no object named {name!r} in session or global layer")
         if not meta["valid"] and not force:
-            return {"invalid": True, "invalid_reason": meta["invalid_reason"], "meta": meta}
+            return {"invalid": True, "name": name, "invalid_reason": meta["invalid_reason"], "meta": meta}
         _, obj = self.store.load(name, force=force)
         self.executor.set(name, obj)
         meta["scope"] = "global"
