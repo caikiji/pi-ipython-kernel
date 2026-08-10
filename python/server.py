@@ -219,6 +219,10 @@ class Server:
     def __init__(self, executor: Executor, workspace: str) -> None:
         self.executor = executor
         self.store = storage.GlobalStore(workspace)
+        # Replay layer (RULES.md): an init script is executed into the
+        # session namespace at startup, so code/functions defined there
+        # are re-registered on every fresh session instead of snapshotted.
+        self.init_report = load_init_script(executor, workspace)
 
     def handle(self, msg: dict) -> dict | None:
         method = msg.get("method")
@@ -234,7 +238,7 @@ class Server:
 
     def _dispatch(self, method: str, params: dict) -> dict | None:
         if method == "hello":
-            return {"version": VERSION, "python": sys.version.split()[0], "engine": self.executor.name}
+            return {"version": VERSION, "python": sys.version.split()[0], "engine": self.executor.name, "init": self.init_report}
         if method == "execute":
             return self.handle_execute(str(params.get("code", "")))
         if method == "ls":
@@ -336,6 +340,32 @@ def _match_name(pattern: str, name: str) -> bool:
     import fnmatch
 
     return fnmatch.fnmatchcase(name, pattern)
+
+
+def load_init_script(executor: Executor, workspace: str) -> dict | None:
+    """Run the workspace init script (if any) into the session namespace.
+
+    Candidates, in order: .kernel/init.py (machine-local, gitignored) and
+    kernel_init.py (project root, committable). The report travels with the
+    hello response so the host can surface failures once per process."""
+    for rel in (".kernel/init.py", "kernel_init.py"):
+        path = os.path.join(workspace, rel)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                code = f.read()
+        except OSError as exc:
+            return {"path": rel, "output": "", "error": f"cannot read init script: {exc}"}
+        result = executor.run(code)
+        return {
+            "path": rel,
+            "output": result.output,
+            "error": result.error,
+            "new": result.new,
+            "changed": result.changed,
+        }
+    return None
 
 
 def main() -> None:

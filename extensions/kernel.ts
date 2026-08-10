@@ -31,6 +31,7 @@ export default function kernelExtension(pi: ExtensionAPI) {
 	let runtimePython: string | undefined;
 	let runtimeFailure: string | undefined;
 	let fallbackNotified = false;
+	let initNotified = false;
 
 	async function getKernel(cwd: string, onStage?: (s: string) => void): Promise<KernelProcess> {
 		if (!kernel || kernelCwd !== cwd) {
@@ -57,7 +58,18 @@ export default function kernelExtension(pi: ExtensionAPI) {
 	function fallbackWarning(): string {
 		if (!runtimeFailure || fallbackNotified) return "";
 		fallbackNotified = true;
-		return `[runtime] managed python bootstrap failed; using system python3. ${runtimeFailure}\n\n`;
+			return `[runtime] managed python bootstrap failed; using system python3. ${runtimeFailure}\n\n`;
+	}
+
+	function initWarning(proc: KernelProcess): string {
+		const init = proc.initReport;
+		if (!init?.path || initNotified) return "";
+		initNotified = true;
+		if (init.error) {
+			return `[init] ${init.path} failed on startup: ${init.error}\n\n`;
+		}
+		const names = init.registered;
+		return `[init] executed ${init.path} (registered: ${names.join(", ") || "no new names"})\n\n`;
 	}
 
 	pi.registerTool({
@@ -91,7 +103,7 @@ export default function kernelExtension(pi: ExtensionAPI) {
 					throw new Error("kernel returned no result");
 				}
 				return {
-					content: [{ type: "text", text: fallbackWarning() + formatExecuteResult(result, timedOut) }],
+					content: [{ type: "text", text: fallbackWarning() + initWarning(proc) + formatExecuteResult(result, timedOut) }],
 					details: { tool: "kernel_run", timedOut },
 				};
 			} catch (err) {
@@ -126,7 +138,7 @@ export default function kernelExtension(pi: ExtensionAPI) {
 				pattern: params.pattern,
 			})) as { session: LsEntry[]; global: LsEntry[] };
 			return {
-				content: [{ type: "text", text: fallbackWarning() + formatLs(res.session ?? [], res.global ?? [], params.detail === true) }],
+				content: [{ type: "text", text: fallbackWarning() + initWarning(proc) + formatLs(res.session ?? [], res.global ?? [], params.detail === true) }],
 				details: { tool: "kernel_ls", counts: { session: res.session?.length ?? 0, global: res.global?.length ?? 0 } },
 			};
 		},
@@ -161,7 +173,7 @@ export default function kernelExtension(pi: ExtensionAPI) {
 				force: params.force === true,
 			})) as GetResult;
 			return {
-				content: [{ type: "text", text: fallbackWarning() + formatGet(res) }],
+				content: [{ type: "text", text: fallbackWarning() + initWarning(proc) + formatGet(res) }],
 				details: { tool: "kernel_get", name: params.name },
 			};
 		},
@@ -197,7 +209,7 @@ export default function kernelExtension(pi: ExtensionAPI) {
 				expected_version: params.expected_version ?? null,
 			})) as { name: string; version: number; overwritten: boolean };
 			return {
-				content: [{ type: "text", text: fallbackWarning() + formatPublish(res) }],
+				content: [{ type: "text", text: fallbackWarning() + initWarning(proc) + formatPublish(res) }],
 				details: { tool: "kernel_publish", name: params.name, version: res.version, overwritten: res.overwritten },
 			};
 		},

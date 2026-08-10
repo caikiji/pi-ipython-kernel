@@ -132,6 +132,44 @@ class RpcServerTest(unittest.TestCase):
         srv = self.make_server()
         self.assertIsNone(srv.handle({"method": "nope"}))
 
+    # -- init script replay -------------------------------------------------
+
+    def init_server(self, init_code):
+        wd = tempfile.mkdtemp()
+        os.makedirs(os.path.join(wd, ".kernel"), exist_ok=True)
+        with open(os.path.join(wd, ".kernel", "init.py"), "w") as f:
+            f.write(init_code)
+        return server.Server(server.ExecEngine(), wd)
+
+    def test_init_script_registers_names(self):
+        srv = self.init_server("def helper(x):\n    return x * 2\nCONST = 42\nprint('init ready')")
+        hello = srv.handle({"method": "hello"})
+        init = hello["init"]
+        self.assertEqual(init["path"], ".kernel/init.py")
+        self.assertIn("init ready", init["output"])
+        names = [n["name"] for n in init["new"]]
+        self.assertIn("helper", names)
+        self.assertIn("CONST", names)
+        # names usable by later execute calls
+        out = srv.handle({"method": "execute", "params": {"code": "helper(CONST)"}})
+        self.assertIn("84", out["output"])
+
+    def test_init_script_error_reported(self):
+        srv = self.init_server("raise ValueError('bad init')")
+        init = srv.handle({"method": "hello"})["init"]
+        self.assertIn("ValueError", init["error"])
+
+    def test_no_init_script(self):
+        srv = self.make_server()
+        self.assertIsNone(srv.handle({"method": "hello"})["init"])
+
+    def test_init_script_kernel_init_py_fallback(self):
+        wd = tempfile.mkdtemp()
+        with open(os.path.join(wd, "kernel_init.py"), "w") as f:
+            f.write("v = 1")
+        srv = server.Server(server.ExecEngine(), wd)
+        init = srv.handle({"method": "hello"})["init"]
+        self.assertEqual(init["path"], "kernel_init.py")
     def test_ls_lists_session_and_global(self):
         srv = self.make_server()
         srv.handle({"method": "execute", "params": {"code": "x = 1"}})

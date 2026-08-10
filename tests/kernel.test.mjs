@@ -7,9 +7,9 @@
  */
 
 import assert from "node:assert/strict";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -289,6 +289,39 @@ await test("kernel: publish rejects unsafe types and bad versions", async () => 
 		err = await k.call("publish", { name: "v", description: "" }).catch((e) => e);
 		assert.ok(err instanceof Error);
 		assert.match(err.message, /description is required/);
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
+await test("kernel: init script registers names and reports", async () => {
+	const wd = workspace();
+	mkdirSync(join(wd, ".kernel"), { recursive: true });
+	writeFileSync(join(wd, ".kernel", "init.py"), "def helper(x):\n    return x * 2\nCONST = 42\n");
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		const r = await k.execute("helper(CONST)");
+		assert.match(r.result.output, /84/);
+		assert.equal(k.initReport?.path, ".kernel/init.py");
+		assert.ok(k.initReport?.registered.includes("helper"));
+		assert.equal(k.initReport?.error, "");
+		const ls = await k.call("ls", { scope: "session" });
+		assert.ok(ls.session.some((o) => o.name === "helper"));
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
+await test("kernel: init script failure reported on hello", async () => {
+	const wd = workspace();
+	writeFileSync(join(wd, "kernel_init.py"), "raise ValueError('bad')");
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		await k.execute("1 + 1");
+		assert.equal(k.initReport?.path, "kernel_init.py");
+		assert.match(k.initReport?.error ?? "", /ValueError/);
 	} finally {
 		await k.shutdown();
 		rmSync(wd, { recursive: true, force: true });

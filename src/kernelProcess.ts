@@ -33,9 +33,15 @@ export class KernelProcess {
 	private client?: JsonRpcClient;
 	private starting?: Promise<void>;
 	private opts: KernelProcessOptions;
+	private helloInit: { path?: string; error?: string; registered: string[] } | null = null;
 
 	constructor(opts: KernelProcessOptions) {
 		this.opts = opts;
+	}
+
+	/** Init script report from the process hello (null until started, or no script). */
+	get initReport(): { path?: string; error?: string; registered: string[] } | null {
+		return this.helloInit;
 	}
 	get running(): boolean {
 		return this.proc !== undefined && this.proc.exitCode === null;
@@ -69,7 +75,11 @@ export class KernelProcess {
 		});
 		// Handshake: the process is ready once it answers hello. A spawn
 		// failure (missing interpreter) surfaces here as well.
-		await client.call("hello", {}, { timeoutMs: this.opts.spawnTimeoutMs ?? 8_000 });
+		const hello = await client.call("hello", {}, { timeoutMs: this.opts.spawnTimeoutMs ?? 8_000 });
+		const init = (hello.result as { init?: { path?: string; error?: string; new?: Array<{ name: string }> } } | undefined)?.init;
+		this.helloInit = init?.path
+			? { path: init.path, error: init.error, registered: (init.new ?? []).map((n) => n.name) }
+			: null;
 	}
 
 	/** Generic RPC call (ls/get/publish). Errors surface as RpcError. */
