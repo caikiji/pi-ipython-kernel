@@ -224,6 +224,7 @@ function reloadText(res: { reload?: ReloadReport }): string {
 			const proc = await session.get(ctx.cwd, stage(_onUpdate));
 			const res = (await proc.call("delete", {
 				name: params.name,
+				expected_version: params.expected_version ?? null,
 			})) as { name: string; deleted: boolean; version: number | null; reload?: ReloadReport };
 			return {
 				content: [{ type: "text", text: session.warningText() + reloadText(res) + formatDelete(res) }],
