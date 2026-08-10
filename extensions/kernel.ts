@@ -12,6 +12,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { KernelSession } from "../src/kernelSession.ts";
 import { formatExecuteResult, formatDelete, formatGet, formatLs, formatPublish, type GetResult, type LsEntry } from "../src/format.ts";
 export default function kernelExtension(pi: ExtensionAPI) {
 	// python/server.py and runtime.json sit next to the package, one level
