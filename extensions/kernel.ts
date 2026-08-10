@@ -33,16 +33,14 @@ export default function kernelExtension(pi: ExtensionAPI) {
 		name: "kernel_run",
 		label: "Kernel Run",
 		description:
-			"Execute Python code in a persistent per-workspace kernel. State (variables, imports, loaded data) survives across kernel_run calls and across sessions in the same workspace. Returns stdout/stderr output plus a namespace diff (new/changed/removed top-level names).",
-		promptSnippet: "Execute Python code in the persistent kernel; state persists between calls",
+			"Run Python in a full IPython environment that persists across calls and across sessions: variables, imports and data stay alive between calls and are shared with later sessions in the same workspace. Handles any Python task — data analysis, computation, ETL, file processing — with rich output for DataFrames/arrays, magics (%timeit, ?), and step-by-step iteration. Returns output plus a namespace diff (new/changed/removed top-level names).",
+		promptSnippet: "Run Python in the persistent IPython kernel for data work and computation",
 		promptGuidelines: [
-			"Use kernel_run for data analysis, file processing, and any computation where intermediate state (variables, imported modules, data) should survive across tool calls.",
-			"The kernel namespace persists between kernel_run calls: define a variable or load data once, reference it in later calls. The response reports new/changed/removed top-level names so you know what the code produced.",
-			"A trailing bare expression (e.g. `df` or `1 + 1`) is printed like in a REPL, so you can inspect objects without print().",
-			"Top-level names starting with `_` are treated as private and excluded from the diff.",
-			"If execution exceeds the timeout, the kernel is interrupted (KeyboardInterrupt semantics) and keeps serving; the response reports INTERRUPTED/TIMEOUT.",
-			"Python exceptions are returned in the response as ERROR with a traceback for debugging; the kernel state is preserved. Kernel-side errors do not fail the tool call itself.",
-			"Use bash for shell/OS operations (installing packages, git, process management); kernel_run is for Python computation.",
+			"Python tasks — data analysis, ETL, computation, file processing, scraping — are this tool's job. Prefer it over bash one-liners when the work is iterative or stateful: define or load data once, reference it in later calls.",
+			"The engine is IPython: magics like %timeit/%%timeit, `?` for introspection, and rich repr of DataFrames/arrays. pandas and numpy are available in the managed runtime.",
+			"A trailing bare expression (e.g. `df` or `1 + 1`) prints like a REPL, so you can inspect objects without print(). Keep big objects in the kernel and inspect with .head()/.describe()/summaries instead of dumping full contents into the conversation.",
+			"Exceptions return as ERROR with a traceback and the namespace is preserved; kernel-side errors do not fail the tool call. Timeout interrupts the call (KeyboardInterrupt semantics) and the kernel keeps serving.",
+			"System operations (installing packages, git, process management) belong in bash; kernel_run is for Python work.",
 		],
 		parameters: Type.Object({
 			code: Type.String({ description: "Python code to execute in the kernel." }),
@@ -77,11 +75,12 @@ export default function kernelExtension(pi: ExtensionAPI) {
 		name: "kernel_ls",
 		label: "Kernel List",
 		description:
-			"List objects in the kernel: the session namespace (variables defined via kernel_run) and the workspace-global layer (objects published with kernel_publish). Global entries include version, size and staleness status.",
-		promptSnippet: "List kernel session variables and published global objects",
+			"Inventory what you already have before starting work: session variables (defined via kernel_run) and the workspace-global layer (objects published with kernel_publish). Global entries include version, size and staleness status.",
+		promptSnippet: "Inventory kernel session variables and published global objects",
 		promptGuidelines: [
-			"Use kernel_ls when starting work in a workspace or after a session switch: it shows what session variables exist (from kernel_run) and what objects were published globally (from kernel_publish) by previous sessions.",
-			"Global objects with [INVALID] are stale snapshots (their source file changed); rebuild and re-publish rather than using them.",
+			"Run this at the start of work in a workspace, or after a session switch: it shows reusable objects (loaded data, computed results) so you do not redo work.",
+			"Global objects flagged [INVALID] are stale snapshots (their source file changed); rebuild and re-publish rather than using them.",
+			"Session-layer variables are ephemeral — they die with the session; publish to the global layer to keep them across sessions.",
 		],
 		parameters: Type.Object({
 			scope: Type.Optional(StringEnum(["all", "session", "global"] as const)),
@@ -107,13 +106,12 @@ export default function kernelExtension(pi: ExtensionAPI) {
 		name: "kernel_get",
 		label: "Kernel Get",
 		description:
-			"Retrieve an object: a session variable or a published global object. Global objects are deserialized and injected into the session namespace (usable by later kernel_run calls). Returns a structure-aware summary by default; pass summarize=false for the full value.",
-		promptSnippet: "Get a kernel object: summary, or load a global object into the session",
+			"Load an object into the current session: a session variable, or a published global object (deserialized and injected into the namespace, usable by later kernel_run calls). Returns a structure-aware summary by default; pass summarize=false for the full value.",
+		promptSnippet: "Load a kernel object into the session (summary or full value)",
 		promptGuidelines: [
-			"Use kernel_get to inspect an object from kernel_ls: it returns a type-aware summary (DataFrame shape/columns/dtypes, dict keys, list length...) instead of dumping full contents.",
-			"Retrieving a global object loads it into the session namespace, so you can use it directly in later kernel_run code.",
-			"If the session already has a variable with the same name, it shadows the global one; delete it first (kernel_run: del name) or pass scope=session to inspect the session copy.",
-			"Stale (INVALID) global objects are not returned by default; pass force=true to retrieve them explicitly, or re-publish from the current source.",
+			"Pick objects from kernel_ls output; the summary (DataFrame shape/columns/dtypes, dict keys, list length...) is enough for most decisions — pass summarize=false only when you need the full value.",
+			"Loading a global object injects it into the session namespace: it becomes usable in later kernel_run code without re-reading.",
+			"A same-name session variable shadows the global one; pass scope=global to load the published copy (it replaces the session value). Stale (INVALID) objects are refused by default; force=true retrieves them explicitly.",
 		],
 		parameters: Type.Object({
 			name: Type.String({ description: "Object name (session variable or global object)." }),
@@ -142,13 +140,13 @@ export default function kernelExtension(pi: ExtensionAPI) {
 		name: "kernel_publish",
 		label: "Kernel Publish",
 		description:
-			"Publish a session object to the workspace-global layer so other sessions in the same workspace can load it with kernel_get. Requires a description; optionally records a source file for staleness checks and supports optimistic locking via expected_version.",
-		promptSnippet: "Publish a kernel object to the workspace-global layer",
+			"Hand off a session object to the workspace-global layer so later sessions in the same workspace can pick it up with kernel_get — the persistence step of the workflow: analyze (kernel_run) -> publish -> retrieve later (kernel_get). Requires a description; optionally records a source file for staleness checks; supports optimistic locking via expected_version.",
+		promptSnippet: "Publish a kernel object to the shared global layer for later sessions",
 		promptGuidelines: [
-			"Use kernel_publish to hand off results (cleaned data, computed config, analysis output) to later sessions in the same workspace.",
-			"A non-empty description is required; include what the object is and how it was produced.",
+			"Publish task outputs worth keeping: cleaned data, computed configs, analysis results. Later sessions load them with kernel_get instead of recomputing.",
+			"The description is required: state what the object is and how it was produced.",
 			"Pass source=<path> when the object was derived from a file; the source hash is recorded and the snapshot is flagged INVALID if the file changes later.",
-			"Publishing a name that already exists overwrites it (last-write-wins) and reports the overwrite; pass expected_version to require that a specific version is being replaced.",
+			"Same-name publish overwrites (last-write-wins) and reports the overwrite; pass expected_version to require that a specific version is being replaced.",
 			"Only safe-to-serialize types can be published (plain data, numpy, pandas/polars frames); other objects must be exported to files.",
 		],
 		parameters: Type.Object({
@@ -178,13 +176,12 @@ export default function kernelExtension(pi: ExtensionAPI) {
 		name: "kernel_delete",
 		label: "Kernel Delete",
 		description:
-			"Delete a published object from the workspace-global layer so other sessions can no longer load it with kernel_get. Idempotent: deleting a missing object reports 'nothing to delete' instead of failing. Pass expected_version to require that a specific version is deleted (optimistic lock). Session variables are not affected; remove those with kernel_run (del name).",
+			"Remove a published object from the workspace-global layer so other sessions can no longer load it with kernel_get — the cleanup step for stale, wrong, or test artifacts. Idempotent: deleting a missing object reports 'nothing to delete' instead of failing. Session variables are unaffected (remove those with kernel_run: del name).",
 		promptSnippet: "Delete a published global kernel object",
 		promptGuidelines: [
-			"Use kernel_delete to clean up the global layer: remove stale snapshots, accidental publishes, or test leftovers so kernel_ls stays small and current.",
+			"Clean up the global layer when objects are stale, wrong, or no longer needed, so kernel_ls stays small and current.",
 			"Deleting is idempotent and safe to retry: deleting an object that does not exist reports 'nothing to delete', not an error.",
 			"Pass expected_version to delete only a specific version (e.g. when another session may have updated the object); a mismatch reports a conflict instead of deleting.",
-			"kernel_delete only affects the global layer. To remove a session variable, use kernel_run (del name).",
 		],
 		parameters: Type.Object({
 			name: Type.String({ description: "Object name to delete from the global layer." }),
