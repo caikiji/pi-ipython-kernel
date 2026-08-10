@@ -1,0 +1,29 @@
+{
+  "name": "pi-ipython-kernel",
+  "version": "0.1.0",
+  "description": "Persistent IPython kernel as pi agent tools: kernel_run / kernel_ls / kernel_get / kernel_publish",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "node tests/run-all.mjs",
+    "lint": "eslint ."
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/kernel.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-tui": "0.83.0",
+    "eslint": "^9.39.5",
+    "typescript-eslint": "^8.65.0"
+  }
+}

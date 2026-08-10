@@ -1,0 +1,21 @@
+{
+  // Type-checking config for extensions/*.ts (editor + `tsc --noEmit`).
+  // Runtime loading goes through jiti (erasable TS, no emit needed).
+  // Type-check once: package.json declares @earendil-works/* peer deps, and
+  // NodeNext resolution finds them in node_modules (gitignored).
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "types": []
+  },
+  "include": [
+    "extensions/*.ts"
+  ]
+}
