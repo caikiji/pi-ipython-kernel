@@ -78,6 +78,18 @@ pi install git:github.com/caikiji/pi-ipython-kernel@main -l
 
 启用后 `/reload` 或新开会话，4 个工具即出现在工具列表。
 
+> **全局安装与开发迭代**：插件以 `git:...` 全局安装时，项目内 /reload 后加载的是
+> 全局 clone（`~/.pi/agent/git/...`）的 main 快照，**不是本地工作区代码**。开发流程：
+>
+> 1. 本地改代码 → `npm test` + 模拟加载验证
+> 2. `git push` 推送到 main
+> 3. `pi update --extensions` 刷新全局 clone 到最新提交（或 `pi install git:github.com/caikiji/pi-ipython-kernel@main` 重装）
+> 4. `/reload` 生效
+>
+> 想在项目内临时用本地代码：`pi -e ./extensions/kernel.ts`（命令行临时扩展，覆盖全局）。
+> 注意不要同时在全局和项目里安装同一包的不同身份（git URL vs 本地路径）——身份不同不去重，
+> 会双加载、同名工具行为不确定。
+
 ## 开发
 
 ```bash
