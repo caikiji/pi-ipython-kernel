@@ -247,8 +247,14 @@ function reloadText(res: { reload?: ReloadReport }): string {
 		const parts: string[] = [];
 		try {
 			const proc = await session.get(cwd);
-			const res = (await proc.call("ls", { scope: "session" })) as { registered?: RegistryEntry[] };
-			const entries = res.registered ?? [];
+		const res = (await proc.call("ls", { scope: "session" })) as { registered?: RegistryEntry[]; reload?: ReloadReport };
+		const entries = res.registered ?? [];
+		// This ls probe can be the first RPC after the agent edited the init
+		// script, in which case the reload report rides on it; surface it
+		// instead of swallowing it (kernel_ls/kernel_run show it otherwise).
+		if (res.reload) {
+			parts.push(formatReload(res.reload));
+		}
 			const hash = createHash("sha256").update(JSON.stringify(entries)).digest("hex");
 			if (hash !== lastInjected.get(cwd)) {
 				const summary = formatRegistrySummary(entries);
