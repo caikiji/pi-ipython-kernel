@@ -47,6 +47,9 @@ VERSION = "0.1.0"
 # Names ignored in namespace diffs (IPython convention: leading underscore).
 _PRIVATE = lambda name: name.startswith("_")  # noqa: E731
 
+# Names IPython injects into user_ns; not user objects, never listed.
+_IPYTHON_RESERVED = frozenset({"In", "Out", "get_ipython", "exit", "quit", "open"})
+
 
 @dataclass
 class ExecResult:
@@ -118,7 +121,7 @@ class Executor:
         return [
             {"name": k, "type": type(v).__name__}
             for k, v in self._ns.items()
-            if not _PRIVATE(k)
+            if not _PRIVATE(k) and k not in _IPYTHON_RESERVED
         ]
 
     def has(self, name: str) -> bool:
@@ -177,7 +180,10 @@ class IPythonEngine(Executor):
         super().__init__()
         from IPython.core.interactiveshell import InteractiveShell
 
+        # Plain output: colored tracebacks would leak ANSI escapes into
+        # agent-visible tool results.
         self._shell = InteractiveShell.instance()
+        self._shell.colors = "NoColor"
         self._shell.run_cell("pass")  # ensure init before first snapshot
         self._ns = self._shell.user_ns
 
