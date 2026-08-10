@@ -44,6 +44,10 @@ import summarize
 
 VERSION = "0.1.0"
 
+# Upper bound for captured stdout/stderr returned to the host; protects
+# the RPC channel from accidental giant prints (e.g. printing a huge
+# dataframe). Truncated output is flagged, never silently dropped.
+MAX_OUTPUT_CHARS = 2 * 1024 * 1024
 # Names ignored in namespace diffs (IPython convention: leading underscore).
 _PRIVATE = lambda name: name.startswith("_")  # noqa: E731
 
@@ -117,12 +121,15 @@ class Executor:
     # -- session namespace access (used by ls/get/publish) ----------------
 
     def session_snapshot(self) -> list[dict]:
-        """Public top-level names of the session namespace."""
-        return [
-            {"name": k, "type": type(v).__name__}
-            for k, v in self._ns.items()
-            if not _PRIVATE(k) and k not in _IPYTHON_RESERVED
-        ]
+        """Public top-level names of the session namespace (sorted)."""
+        return sorted(
+            (
+                {"name": k, "type": type(v).__name__}
+                for k, v in self._ns.items()
+                if not _PRIVATE(k) and k not in _IPYTHON_RESERVED
+            ),
+            key=lambda o: o["name"],
+        )
 
     def has(self, name: str) -> bool:
         return name in self._ns
@@ -146,30 +153,38 @@ class ExecEngine(Executor):
         if compiled is None:
             result.incomplete = True
             return
+        tail = self._extract_tail_expression(code)
+        if tail is not None:
+            # Compile the remaining statements (the tail expression was
+            # removed so it is evaluated once below, never twice).
+            tree = ast.parse(code)
+            tree.body = tree.body[:-1]
+            compiled = compile(ast.Module(body=tree.body, type_ignores=[]), '<kernel-exec>', 'exec')
         exec(compiled, self._ns)
-        self._display_bare_expression(code, result)
+        if tail is not None:
+            value = eval(compile(ast.Expression(tail), '<kernel-exec>', 'eval'), self._ns)
+            if value is not None:
+                print(repr(value))
 
-    def _display_bare_expression(self, code: str, result: ExecResult) -> None:
-        """REPL-like: print repr() of a trailing bare expression, e.g. `df`."""
+    def _extract_tail_expression(self, code: str) -> ast.AST | None:
+        """Return the last statement's expression for REPL-style display.
+
+        Only a trailing bare expression qualifies (e.g. `df`, `1 + 1`);
+        trailing strings (docstrings) are left in place. The expression is
+        evaluated exactly once: it is removed from the exec body and eval'd
+        separately, so side effects like print() never run twice."""
         try:
             tree = ast.parse(code)
         except SyntaxError:
-            return
-        body = tree.body
-        if not body:
-            return
-        last = body[-1]
+            return None
+        if not tree.body:
+            return None
+        last = tree.body[-1]
         if not isinstance(last, ast.Expr):
-            return
+            return None
         if isinstance(last.value, ast.Constant) and isinstance(last.value.value, str):
-            return  # trailing docstring/comment-like string
-        segment = ast.get_source_segment(code, last.value)
-        if not segment:
-            return
-        value = eval(compile(ast.Expression(last.value), "<kernel-exec>", "eval"), self._ns)
-        if value is not None:
-            print(repr(value))
-
+            return None
+        return last.value
 
 class IPythonEngine(Executor):
     """Embedded IPython InteractiveShell engine (used when IPython is installed)."""
@@ -238,7 +253,13 @@ class Server:
 
     def _dispatch(self, method: str, params: dict) -> dict | None:
         if method == "hello":
-            return {"version": VERSION, "python": sys.version.split()[0], "engine": self.executor.name, "init": self.init_report}
+            return {
+                "version": VERSION,
+                "python": sys.version.split()[0],
+                "engine": self.executor.name,
+                "cwd": os.getcwd(),
+                "init": self.init_report,
+            }
         if method == "execute":
             return self.handle_execute(str(params.get("code", "")))
         if method == "ls":
@@ -253,8 +274,14 @@ class Server:
 
     def handle_execute(self, code: str) -> dict:
         result = self.executor.run(code)
+        output = result.output
+        truncated = False
+        if len(output) > MAX_OUTPUT_CHARS:
+            output = output[:MAX_OUTPUT_CHARS] + f"\n... [output truncated at {MAX_OUTPUT_CHARS} chars]"
+            truncated = True
         return {
-            "output": result.output,
+            "output": output,
+            "output_truncated": truncated,
             "error": result.error,
             "incomplete": result.incomplete,
             "interrupted": result.interrupted,

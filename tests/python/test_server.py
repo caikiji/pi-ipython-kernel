@@ -128,6 +128,23 @@ class RpcServerTest(unittest.TestCase):
         out = srv.handle({"method": "execute", "params": {"code": "a"}})
         self.assertIn("1", out["output"])
 
+    def test_execute_output_truncated(self):
+        srv = self.make_server()
+        out = srv.handle({"method": "execute", "params": {"code": "print('x' * 3000000)"}})
+        self.assertTrue(out["output_truncated"])
+        self.assertLess(len(out["output"]), server.MAX_OUTPUT_CHARS + 200)
+        self.assertIn("truncated", out["output"][-80:])
+
+    def test_execute_small_output_not_truncated(self):
+        srv = self.make_server()
+        out = srv.handle({"method": "execute", "params": {"code": "print('hi')"}})
+        self.assertFalse(out["output_truncated"])
+        self.assertEqual(out["output"], "hi\n")
+
+    def test_hello_includes_cwd(self):
+        srv = self.make_server()
+        hello = srv.handle({"method": "hello"})
+        self.assertTrue(hello["cwd"].startswith("/"))
     def test_unknown_method(self):
         srv = self.make_server()
         self.assertIsNone(srv.handle({"method": "nope"}))
