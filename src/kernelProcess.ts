@@ -75,7 +75,12 @@ export class KernelProcess {
 		});
 		// Handshake: the process is ready once it answers hello. A spawn
 		// failure (missing interpreter) surfaces here as well.
-		const hello = await client.call("hello", {}, { timeoutMs: this.opts.spawnTimeoutMs ?? 8_000 });
+		// Cold start is slow (managed runtime imports ipython/pandas first
+		// time); give the handshake a wide window instead of failing fast.
+		const hello = await client.call("hello", {}, {
+			timeoutMs: this.opts.spawnTimeoutMs ?? 30_000,
+			graceMs: 15_000,
+		});
 		const init = (hello.result as { init?: { path?: string; error?: string; new?: Array<{ name: string }> } } | undefined)?.init;
 		this.helloInit = init?.path
 			? { path: init.path, error: init.error, registered: (init.new ?? []).map((n) => n.name) }

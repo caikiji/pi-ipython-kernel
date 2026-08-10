@@ -103,4 +103,5 @@ tests/                 # tests/python/*.py + tests/*.test.mjs
 - [x] M4 托管运行时引导（uv + python-build-standalone）
 - [x] IPython 引擎接入（magics/rich repr，ANSI 清理 + 保留名过滤）
 - [x] 重放层：工作区 init 脚本（.kernel/init.py / kernel_init.py）启动时自动执行
-- [ ] 打磨：托管运行时真实下载验证（首次内核调用触发）
+- [x] 托管运行时真实下载验证（首次调用完成引导，engine=ipython 确认）
+- [x] 验收测试：26 项检查通过（25 项一次通过，1 项修正 fixture 后通过），跨会话闭环验证完成
