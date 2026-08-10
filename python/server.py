@@ -466,7 +466,10 @@ class Server:
             return {"error": {"code": "publish", "message": str(exc)}}
         except KeyError as exc:
             return {"error": {"code": "not_found", "message": str(exc)}}
-        if resp is not None and "error" not in resp and reload_report is not None:
+        # Note: `error` may be present with an empty-string value (execute
+        # results always carry an error key); only a truthy top-level error
+        # (a dispatch failure) suppresses the reload report.
+        if resp is not None and not resp.get("error") and reload_report is not None:
             resp["reload"] = reload_report
         return resp
 

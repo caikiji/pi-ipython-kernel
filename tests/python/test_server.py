@@ -348,6 +348,22 @@ class RpcServerTest(unittest.TestCase):
         ls2 = srv.handle({"method": "ls", "params": {"scope": "session"}})
         self.assertNotIn("reload", ls2)
 
+    def test_init_script_hot_reload_reported_on_execute(self):
+        # kernel_run goes through "execute", whose result always carries an
+        # empty-string "error" key; the reload report must still attach
+        # (regression: "error" not in resp was false for every execute).
+        srv = self.init_server("@register('a', 'fn a')\ndef a():\n    return 1\n")
+        srv.handle({"method": "hello"})
+        with open(self.init_script_path(srv), "w") as f:
+            f.write("@register('b', 'fn b')\ndef b():\n    return 2\n")
+        out = srv.handle({"method": "execute", "params": {"code": "b()"}})
+        rel = out["reload"]
+        self.assertEqual(rel["path"], ".kernel/init.py")
+        self.assertEqual(rel["error"], "")
+        self.assertEqual(rel["registered_added"], ["b"])
+        self.assertEqual(rel["registered_removed"], ["a"])
+        self.assertIn("2", out["output"])
+
     def test_init_script_hot_reload_failure_rolls_back(self):
         srv = self.init_server("@register('a', 'fn a')\ndef a():\n    return 1\nV = 1\n")
         srv.handle({"method": "hello"})
