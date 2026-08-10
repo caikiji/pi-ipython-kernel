@@ -45,6 +45,7 @@
 - 会话层与全局层同名对象：会话层 shadow 全局层，不污染（写入会话层不改全局层）
 - Python 进程生命周期：随 pi 会话退出而终止（会话结束清理）；进程内异常不得退出主循环，必须返回 error 响应
 - 内核工具超时（默认 30s）由 TS 侧强制，超时后进程应能继续服务（interrupt 语义），不能整体杀掉
+- 提交规范：conventional commits 风格 `type(scope): subject`——type 用 feat/fix/docs/refactor/chore/test，scope 用模块名（kernel/extensions/python/rules/docs/tests）；subject 用英文祈使句；一次提交 = 一个逻辑变更（一个功能、一个修复、一份文档），不攒批、不碎片化刷提交；提交前必须跑通 `npm test`（Python + Node 全绿）
 
 ## 意图 (layout changes, intent does not)
 
