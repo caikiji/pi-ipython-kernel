@@ -289,14 +289,21 @@ class Executor:
 
     # -- execution ----------------------------------------------------
 
-    def run(self, code: str) -> ExecResult:
+    def run(self, code: str, display: bool = True) -> ExecResult:
+        """Execute code and report output/errors/namespace diff.
+
+        `display=False` runs the code with script semantics: trailing (and,
+        for IPython, any) bare expression values are not displayed, while
+        stdout/stderr, side effects and errors behave identically. Init
+        scripts use this so a last-statement `register(...)` call does not
+        leak its return value as `Out[n]`."""
         before = self._snapshot()
         out = io.StringIO()
         err = io.StringIO()
         result = ExecResult()
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                self._execute(code, result)
+                self._execute(code, result, display=display)
         except KeyboardInterrupt:
             result.interrupted = True
             result.error = "KeyboardInterrupt"
@@ -317,7 +324,7 @@ class Executor:
             result.new, result.changed, result.removed = self._diff(before)
         return result
 
-    def _execute(self, code: str, result: ExecResult) -> None:
+    def _execute(self, code: str, result: ExecResult, display: bool = True) -> None:
         raise NotImplementedError
 
     # -- session namespace access (used by ls/get/publish) ----------------
@@ -350,7 +357,7 @@ class ExecEngine(Executor):
     def __init__(self) -> None:
         super().__init__()
 
-    def _execute(self, code: str, result: ExecResult) -> None:
+    def _execute(self, code: str, result: ExecResult, display: bool = True) -> None:
         compiled = codeop.compile_command(code, '<kernel-exec>', 'exec')
         if compiled is None:
             result.incomplete = True
@@ -364,10 +371,11 @@ class ExecEngine(Executor):
             compiled = compile(ast.Module(body=tree.body, type_ignores=[]), '<kernel-exec>', 'exec')
         exec(compiled, self._ns)
         if tail is not None:
+            # The tail is still evaluated (side effects like register()
+            # calls happen here); display=False only skips the REPL echo.
             value = eval(compile(ast.Expression(tail), '<kernel-exec>', 'eval'), self._ns)
-            if value is not None:
+            if display and value is not None:
                 print(repr(value))
-
     def _extract_tail_expression(self, code: str) -> ast.AST | None:
         """Return the last statement's expression for REPL-style display.
 
@@ -408,11 +416,14 @@ class IPythonEngine(Executor):
         self._ns["register"] = self._make_register()
         self._ns["unregister"] = self._make_unregister()
 
-    def _execute(self, code: str, result: ExecResult) -> None:
+    def _execute(self, code: str, result: ExecResult, display: bool = True) -> None:
         from IPython.core.error import InputRejected
 
         try:
-            cell = self._shell.run_cell(code, store_history=False)
+            # silent=True sets interactivity to "none": bare expression
+            # values are not displayed (no `Out[n]` echo), while stdout,
+            # side effects and error reporting behave identically.
+            cell = self._shell.run_cell(code, store_history=False, silent=not display)
         except InputRejected:
             result.incomplete = True
             return
@@ -422,7 +433,6 @@ class IPythonEngine(Executor):
             result.error = "".join(
                 traceback.format_exception(type(cell.error_in_exec), cell.error_in_exec, cell.error_in_exec.__traceback__)
             )
-
 
 def make_executor() -> Executor:
     try:
@@ -558,7 +568,7 @@ class Server:
             ex._replay_registered = set()
             ex._replaying_init = True
             try:
-                result = ex.run(code)
+                result = ex.run(code, display=False)
             finally:
                 ex._replaying_init = False
             if len(result.output) > RELOAD_OUTPUT_CAP:
@@ -770,7 +780,7 @@ def load_init_script(executor: Executor, workspace: str) -> dict | None:
         return {"path": rel, "output": "", "error": f"cannot read init script: {exc}"}
     executor._replaying_init = True
     try:
-        result = executor.run(code)
+        result = executor.run(code, display=False)
     finally:
         executor._replaying_init = False
     executor._init_var_objs = {n: executor._ns[n] for n in set(executor._snapshot_objs()) - before_vars}

@@ -59,6 +59,17 @@ class ExecEngineTest(unittest.TestCase):
         result = self.run_ok('"just a string"')
         self.assertEqual(result.output, "")
 
+    def test_display_false_suppresses_tail_echo(self):
+        result = self.engine.run("x = [1, 2, 3]\nx", display=False)
+        self.assertEqual(result.error, "")
+        self.assertEqual(result.output, "", "tail expression must not be echoed")
+
+    def test_display_false_keeps_stdout_and_side_effects(self):
+        result = self.engine.run("print('hi')\nregister('probe', 7, 'p')", display=False)
+        self.assertEqual(result.error, "")
+        self.assertIn("hi", result.output)
+        self.assertIn("probe", self.engine.registry_names(), "tail register() call must still run")
+
     def test_stdout_captured(self):
         result = self.run_ok("for i in range(3):\n    print(i)")
         self.assertEqual(result.output, "0\n1\n2\n")
@@ -238,6 +249,20 @@ class IPythonEngineTest(unittest.TestCase):
         result = self.engine.run("x")
         self.assertIn("7", result.output)
 
+    def test_display_false_suppresses_expression_echo(self):
+        result = self.engine.run("x = 7\nx", display=False)
+        self.assertEqual(result.error, "")
+        self.assertEqual(result.output, "", "expression values must not be echoed")
+        self.engine.run("y = 7")
+        displayed = self.engine.run("y")
+        self.assertIn("7", displayed.output, "default run() must keep the REPL echo")
+
+    def test_display_false_keeps_stdout_and_side_effects(self):
+        result = self.engine.run("print('hi')\nregister('ip2', 7, 'p')", display=False)
+        self.assertEqual(result.error, "")
+        self.assertIn("hi", result.output)
+        self.assertIn("ip2", self.engine.registry_names())
+
     def test_register_available(self):
         result = self.engine.run("register('ip', lambda: 1, 'ipython probe')")
         self.assertEqual(result.error, "")
@@ -324,6 +349,26 @@ class RpcServerTest(unittest.TestCase):
         init = srv.handle({"method": "hello"})["init"]
         self.assertIn("overwrote existing entry 'k'", init["output"])
 
+    def test_init_script_trailing_register_not_echoed(self):
+        # Regression: a last-statement register() call returned the object,
+        # which leaked as a REPL echo (`Out[n]: <function ...>`) into the
+        # init report. Init scripts run with script semantics: no echo.
+        srv = self.init_server("register('div', lambda a, b: a / b, 'Divide.')\n")
+        init = srv.handle({"method": "hello"})["init"]
+        self.assertEqual(init["error"], "")
+        self.assertEqual(init["output"], "", "register() return value must not be echoed")
+
+    def test_init_script_hot_reload_trailing_register_not_echoed(self):
+        srv = self.init_server("register('a', 1, 'first')\n")
+        srv.handle({"method": "hello"})
+        with open(self.init_script_path(srv), "w") as f:
+            f.write("register('b', lambda: 2, 'fn b')\n")
+        ls = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        rel = ls["reload"]
+        self.assertEqual(rel["error"], "")
+        self.assertNotIn("Out[", rel["output"])
+        self.assertNotIn("<function", rel["output"])
+        self.assertEqual(rel["registered_added"], ["b"])
     def init_script_path(self, srv):
         return os.path.join(srv.workspace, ".kernel", "init.py")
 
