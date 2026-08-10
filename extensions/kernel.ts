@@ -53,10 +53,10 @@ function reloadText(res: { reload?: ReloadReport }): string {
 		name: "kernel_run",
 		label: "Kernel Run",
 		description:
-			"Run Python in a full IPython environment that persists across calls and across sessions: variables, imports and data stay alive between calls and are shared with later sessions in the same workspace. Handles any Python task — data analysis, computation, ETL, file processing — with rich output for DataFrames/arrays, magics (%timeit, ?), and step-by-step iteration. Returns output plus a namespace diff (new/changed/removed top-level names).",
-		promptSnippet: "Run Python in the persistent IPython kernel for data work and computation",
+			"Run Python in a full IPython environment that persists across calls and across sessions: variables, imports and data stay alive between calls and are shared with later sessions in the same workspace. Handles any Python task you'd otherwise write a throwaway script for — data analysis, code generation, task orchestration, algorithm prototyping, batch refactoring, document/report generation, file processing, small local services — anything needing programming logic plus step-by-step iteration. Rich output for DataFrames/arrays, magics (%timeit, ?), and a namespace diff (new/changed/removed top-level names).",
+		promptSnippet: "Run Python in the persistent IPython kernel for any programming task",
 		promptGuidelines: [
-			"Python tasks — data analysis, ETL, computation, file processing, scraping — are this tool's job. Prefer it over bash one-liners when the work is iterative or stateful: define or load data once, reference it in later calls.",
+			"The kernel is a persistent, stateful Python environment — the go-to place for any task that needs programming logic, multi-step state, or iterative exploration (analysis, code generation, orchestration, prototyping, batch edits). Prefer it over bash one-liners when the work is iterative or stateful; prefer bash for one-shot commands.",
 			"The engine is IPython: magics like %timeit/%%timeit, `?` for introspection, and rich repr of DataFrames/arrays. pandas and numpy are available in the managed runtime.",
 			"A trailing bare expression (e.g. `df` or `1 + 1`) prints like a REPL, so you can inspect objects without print(). Keep big objects in the kernel and inspect with .head()/.describe()/summaries instead of dumping full contents into the conversation.",
 			"Exceptions return as ERROR with a traceback and the namespace is preserved; kernel-side errors do not fail the tool call. Timeout interrupts the call (KeyboardInterrupt semantics) and the kernel keeps serving.",
@@ -142,7 +142,7 @@ function reloadText(res: { reload?: ReloadReport }): string {
 			"Load an object into the current session: a session variable, or a published global object (deserialized and injected into the namespace, usable by later kernel_run calls). Returns a structure-aware summary by default; pass summarize=false for the full value.",
 		promptSnippet: "Load a kernel object into the session (summary or full value)",
 		promptGuidelines: [
-			"Pick objects from kernel_ls output; the summary (DataFrame shape/columns/dtypes, dict keys, list length...) is enough for most decisions — pass summarize=false only when you need the full value.",
+			"Pick objects from kernel_ls output; the summary (dict keys, list length, DataFrame shape/columns/dtypes, ...) is enough for most decisions — pass summarize=false only when you need the full value.",
 			"Loading a global object injects it into the session namespace: it becomes usable in later kernel_run code without re-reading.",
 			"A same-name session variable shadows the global one; pass scope=global to load the published copy (it replaces the session value). Stale (INVALID) objects are refused by default; force=true retrieves them explicitly.",
 		],
@@ -173,10 +173,10 @@ function reloadText(res: { reload?: ReloadReport }): string {
 		name: "kernel_publish",
 		label: "Kernel Publish",
 		description:
-			"Hand off a session object to the workspace-global layer so later sessions in the same workspace can pick it up with kernel_get — the persistence step of the workflow: analyze (kernel_run) -> publish -> retrieve later (kernel_get). Requires a description; optionally records a source file for staleness checks; supports optimistic locking via expected_version.",
+			"Hand off a session object to the workspace-global layer so later sessions in the same workspace can pick it up with kernel_get — the persistence step of the workflow: compute/explore/build in kernel_run -> publish -> reuse later via kernel_get. Requires a description; optionally records a source file for staleness checks; supports optimistic locking via expected_version.",
 		promptSnippet: "Publish a kernel object to the shared global layer for later sessions",
 		promptGuidelines: [
-			"Publish task outputs worth keeping: cleaned data, computed configs, analysis results. Later sessions load them with kernel_get instead of recomputing.",
+			"Publish task outputs worth keeping: results, computed configs, intermediate state. Later sessions load them with kernel_get instead of recomputing.",
 			"The description is required: state what the object is and how it was produced.",
 			"Pass source=<path> when the object was derived from a file; the source hash is recorded and the snapshot is flagged INVALID if the file changes later.",
 			"Same-name publish overwrites (last-write-wins) and reports the overwrite; pass expected_version to require that a specific version is being replaced.",
