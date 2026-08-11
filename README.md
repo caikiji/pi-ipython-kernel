@@ -80,10 +80,12 @@ register("raw_df", pd.read_csv("sales.csv"), "Raw sales data.")        # 纯数�
 内核服务使用**托管 Python**，不依赖、不修改系统 Python：
 
 1. 首次调用内核工具时，从 `python/runtime.json` 清单惰性引导
-2. 下载固定版本 uv（官方 .sha256 校验）→ `uv python install 3.13` → 建 venv → 装依赖（ipython/numpy/pandas/pyarrow）
+2. 下载固定版本 uv（官方 .sha256 校验，带超时与重试）→ `uv python install 3.13` → 建 venv → 装依赖（ipython/numpy/pandas/pyarrow）
 3. 缓存于 `$PI_KERNEL_CACHE` 或 `~/.cache/pi-ipython-kernel/`，之后秒级复用；清单变化自动重建
-4. 引导失败自动降级系统 python3 并提示一次
+4. 引导失败自动降级系统 Python（POSIX 找 `python3`，Windows 找 `python`）并提示一次
 5. 需要新包时用托管 uv 装进托管 venv：`~/.cache/pi-ipython-kernel/uv/uv pip install --python ~/.cache/pi-ipython-kernel/venv/bin/python <pkg>`（路径由 `$PI_KERNEL_CACHE` 可覆盖），装完当前会话即可 import
+
+**复用本地 Python（跳过全部下载）**：设置环境变量 `PI_KERNEL_PYTHON=<解释器路径>`（如 `C:\miniconda\python.exe` 或 `/usr/bin/python3`）后，内核直接使用该解释器，不再下载 uv/Python/依赖。IPython 可选——没有时自动降级为标准库 exec 引擎（零依赖可跑）；pandas/numpy 由你本地环境决定。
 
 升 Python 版本只改 `runtime.json`，不重新发包。
 
