@@ -20,3 +20,4 @@ console.log("\n=== Python tests passed ===\n");
 
 await import("./kernel.test.mjs");
 await import("./runtime.test.mjs");
+await import("./mcp.test.mjs");
