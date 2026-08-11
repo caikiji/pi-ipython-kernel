@@ -116,6 +116,34 @@ pi install git:github.com/caikiji/pi-ipython-kernel@main -l
 > 注意不要同时在全局和项目里安装同一包的不同身份（git URL vs 本地路径）——身份不同不去重，
 > 会双加载、同名工具行为不确定。
 
+## MCP 模式（兼容任意 harness）
+
+同一套内核还以 **MCP 服务器** 形态提供，Claude Desktop / Cursor 等任意支持 MCP 的客户端都能用：
+
+```
+node mcp/server.ts        # Node ≥ 23.6；22.18+ 加 --experimental-strip-types
+```
+
+- **工作区 = 服务器进程的 cwd**：`.kernel/` 全局层与 init 脚本（kernel_init.py）都取自 cwd，与 pi 插件语义一致
+- **工具**：kernel_run / kernel_ls / kernel_get / kernel_publish / kernel_delete（与 pi 插件同名同参数同输出格式）
+- **资源**：`kernel://registry` 暴露 init 脚本注册表摘要（对应 pi 插件的 before_agent_start 注入，MCP 里由 agent 按需读取）
+- 托管运行时引导、超时中断、SQLite 全局层、重放层全部复用，零改动
+
+Claude Desktop（`claude_desktop_config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "kernel": {
+      "command": "node",
+      "args": ["C:/Users/<you>/.pi/agent/git/github.com/caikiji/pi-ipython-kernel/mcp/server.ts"],
+      "cwd": "D:/path/to/your/workspace"
+    }
+  }
+}
+```
+
+首次调用会触发托管运行时引导（约 1-2 分钟，之后缓存）；不想下载就在 `env` 里设 `PI_KERNEL_PYTHON` 复用本地 Python。
 ## 开发
 
 ```bash
@@ -124,8 +152,9 @@ tsc --noEmit           # 类型检查（需一次 npm install 提供 @earendil-w
 ```
 
 ```
-extensions/kernel.ts   # 工具注册 + 生命周期（薄层）
-src/                   # 纯 Node 逻辑：rpc / kernelProcess / format / runtime
+extensions/kernel.ts   # pi 插件：工具注册 + 生命周期（薄层）
+mcp/server.ts          # MCP 服务器入口（同内核，兼容任意 harness）
+src/                   # 纯 Node 逻辑：rpc / kernelProcess / format / runtime / mcp
 python/server.py       # 内核服务：stdin/stdout JSON-RPC
 python/storage.py      # 全局层：序列化 + SQLite
 tests/                 # tests/python/*.py + tests/*.test.mjs
