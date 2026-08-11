@@ -49,6 +49,11 @@ function reloadText(res: { reload?: ReloadReport }): string {
 	return res.reload ? formatReload(res.reload) + "\n\n" : "";
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve_) => setTimeout(resolve_, ms));
+
+/** Init-script hot reload summary, prepended to tool output when a reload
+ * fired as part of the call. */
+
 	pi.registerTool({
 		name: "kernel_run",
 		label: "Kernel Run",
@@ -246,24 +251,36 @@ function reloadText(res: { reload?: ReloadReport }): string {
 		const cwd = event.systemPromptOptions?.cwd;
 		if (!cwd) return;
 		const parts: string[] = [];
-		try {
-			const proc = await session.get(cwd);
-		const res = (await proc.call("ls", { scope: "session" })) as { registered?: RegistryEntry[]; reload?: ReloadReport };
-		const entries = res.registered ?? [];
-		// This ls probe can be the first RPC after the agent edited the init
-		// script, in which case the reload report rides on it; surface it
-		// instead of swallowing it (kernel_ls/kernel_run show it otherwise).
-		if (res.reload) {
-			parts.push(formatReload(res.reload));
-		}
-			const hash = createHash("sha256").update(JSON.stringify(entries)).digest("hex");
-			if (hash !== lastInjected.get(cwd)) {
-				const summary = formatRegistrySummary(entries);
-				if (summary) parts.push(summary);
-				lastInjected.set(cwd, hash);
+		// Best-effort, never blocks the conversation: pi awaits this hook
+		// before starting the agent turn. On first use the kernel spawn
+		// triggers the managed-runtime bootstrap (downloads + pip install),
+		// which can take minutes on a slow link — so race the probe
+		// against a short budget and skip the summary when the kernel is
+		// not ready yet. The bootstrap keeps running in the background and
+		// the first real kernel tool call waits on it (with visible stage
+		// output in the tool UI).
+		const probe = session.get(cwd).catch(() => undefined);
+		const proc = await Promise.race([probe, sleep(3_000).then(() => undefined)]);
+		if (proc) {
+			try {
+				const res = (await proc.call("ls", { scope: "session" })) as { registered?: RegistryEntry[]; reload?: ReloadReport };
+				const entries = res.registered ?? [];
+				// This ls probe can be the first RPC after the agent edited
+				// the init script, in which case the reload report rides on
+				// it; surface it instead of swallowing it (kernel_ls /
+				// kernel_run show it otherwise).
+				if (res.reload) {
+					parts.push(formatReload(res.reload));
+				}
+				const hash = createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+				if (hash !== lastInjected.get(cwd)) {
+					const summary = formatRegistrySummary(entries);
+					if (summary) parts.push(summary);
+					lastInjected.set(cwd, hash);
+				}
+			} catch {
+				// Kernel not ready (e.g. bootstrap failed); skip the summary.
 			}
-		} catch {
-			// Kernel not ready (e.g. bootstrap failed); skip the summary.
 		}
 		const changes = checkInitHashes(cwd);
 		if (changes.length > 0) {
