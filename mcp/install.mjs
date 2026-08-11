@@ -1,30 +1,32 @@
 #!/usr/bin/env node
 /**
- * One-command MCP registration for the kernel server.
+ * One-command MCP registration for the kernel server, project-scoped.
  *
- * New-user friendly: instead of hand-editing a JSON config with absolute
- * paths, run this script and it locates the server and the client config
- * itself:
+ * Writes a standard .mcp.json into the project root — the shared,
+ * project-level MCP config convention that pi (via pi-mcp-adapter),
+ * Cursor, VS Code Copilot and other MCP clients pick up automatically.
+ * No absolute paths to type by hand, nothing global to configure:
  *
  *   git clone https://github.com/caikiji/pi-ipython-kernel
- *   cd pi-ipython-kernel
- *   node mcp/install.mjs
- *   # then fully quit and restart Claude Desktop
+ *   cd /path/to/your/project
+ *   node /path/to/pi-ipython-kernel/mcp/install.mjs
+ *
+ * This creates <project>/.mcp.json with a "kernel" server whose cwd is
+ * the project itself — the kernel workspace (its .kernel/ store and
+ * kernel_init.py live there). Restart pi (or run /reload; pi's /mcp
+ * command lists the server) and the kernel tools are available.
  *
  * Options:
- *   --cwd <path>      Workspace the kernel should use (default: the
- *                     directory you run this from). This is where the
- *                     .kernel/ store and kernel_init.py live.
- *   --name <name>     Client-side server name (default: "kernel").
- *   --config <path>   Write to a custom config file instead of the
- *                     default Claude Desktop location (testing/other
- *                     clients).
+ *   --cwd <path>      Project to write .mcp.json into (default: the
+ *                     directory you run this from).
+ *   --name <name>     Server name in the config (default: "kernel").
+ *   --config <path>   Write to a custom config file (testing/other
+ *                     clients) instead of <project>/.mcp.json.
  *   --uninstall       Remove the entry again.
  *
  * Pure Node, no dependencies.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -38,21 +40,10 @@ const opt = (name, fallback) => {
 	const i = args.indexOf(name);
 	return i !== -1 && args[i + 1] !== undefined ? args[i + 1] : fallback;
 };
-const cwd = resolve(opt("--cwd", process.cwd()));
+const project = resolve(opt("--cwd", process.cwd()));
 const name = opt("--name", "kernel");
-const configPath = resolve(opt("--config", defaultConfigPath()));
+const configPath = resolve(opt("--config", resolve(project, ".mcp.json")));
 const uninstall = args.includes("--uninstall");
-
-function defaultConfigPath() {
-	switch (process.platform) {
-		case "win32":
-			return resolve(process.env.APPDATA ?? resolve(homedir(), "AppData", "Roaming"), "Claude", "claude_desktop_config.json");
-		case "darwin":
-			return resolve(homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json");
-		default:
-			return resolve(process.env.XDG_CONFIG_HOME ?? resolve(homedir(), ".config"), "Claude", "claude_desktop_config.json");
-	}
-}
 
 // ---------------------------------------------------------------- main
 
@@ -79,7 +70,6 @@ if (nodeMajor < 22) {
 	console.error(`This server needs Node >= 22.18 (you have ${process.versions.node}).`);
 	process.exit(1);
 }
-// Node 23.6+ strips types by default; 22.18-23.x needs the flag.
 // Node 23.6+ strips types by default; 22.18-23.5 needs the flag.
 const flag = nodeMajor >= 24 || (nodeMajor === 23 && Number(process.versions.node.split(".")[1]) >= 6) ? null : "--experimental-strip-types";
 
@@ -88,16 +78,16 @@ const mcpServers = (cfg.mcpServers ??= {});
 const entry = {
 	command: process.execPath,
 	args: flag ? [flag, serverPath] : [serverPath],
-	cwd,
-	env: { PI_KERNEL_PYTHON: process.env.PI_KERNEL_PYTHON },
+	cwd: project,
 };
-if (process.env.PI_KERNEL_PYTHON === undefined) delete entry.env;
+if (process.env.PI_KERNEL_PYTHON) {
+	entry.env = { PI_KERNEL_PYTHON: process.env.PI_KERNEL_PYTHON };
+}
 
 if (uninstall) {
 	delete mcpServers[name];
 	writeConfig(cfg);
 	console.log(`Removed "${name}" from ${configPath}`);
-	console.log("Quit and restart Claude Desktop to apply.");
 	process.exit(0);
 }
 
@@ -105,20 +95,20 @@ const prev = mcpServers[name];
 mcpServers[name] = entry;
 writeConfig(cfg);
 
-console.log(`Registered MCP server "${name}":`);
+console.log(`Registered MCP server "${name}" in ${configPath}`);
 console.log(`  command : ${entry.command}`);
 console.log(`  args    : ${entry.args.join(" ")}`);
-console.log(`  cwd     : ${cwd}   (the kernel workspace)`);
+console.log(`  cwd     : ${project}   (the kernel workspace)`);
 if (prev) console.log(`(replaced a previous "${name}" entry)`);
-console.log(`config   : ${configPath}`);
 console.log("");
 console.log("Next steps:");
-console.log("  1. Fully quit Claude Desktop (not just close the window)");
-console.log("  2. Relaunch it — the kernel tools (kernel_run / kernel_ls /");
-console.log("     kernel_get / kernel_publish / kernel_delete) appear in the");
-console.log("     tools list.");
-console.log("  3. First tool call bootstraps the managed Python runtime");
-console.log("     (a few minutes, cached afterwards). Set PI_KERNEL_PYTHON");
-console.log("     before running this script to reuse a local Python instead.");
+console.log("  - pi: restart the session (or /reload). The kernel tools");
+console.log("    (kernel_run / kernel_ls / kernel_get / kernel_publish /");
+console.log("    kernel_delete) become available; /mcp lists the server.");
+console.log("  - Cursor / VS Code Copilot / Claude Code: the project");
+console.log("    .mcp.json is picked up automatically (reload as needed).");
+console.log("  - First tool call bootstraps the managed Python runtime");
+console.log("    (a few minutes, cached afterwards). Set PI_KERNEL_PYTHON");
+console.log("    before running this script to reuse a local Python instead.");
 console.log("");
 console.log(`To undo: node ${resolve(root, "mcp", "install.mjs")} --uninstall`);

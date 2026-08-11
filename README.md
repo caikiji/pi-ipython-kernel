@@ -118,19 +118,14 @@ pi install git:github.com/caikiji/pi-ipython-kernel@main -l
 
 ## MCP 模式（兼容任意 harness）
 
-同一套内核还以 **MCP 服务器** 形态提供，Claude Desktop / Cursor 等任意支持 MCP 的客户端都能用。
-
-**一键接入 Claude Desktop**（自动定位服务器路径并写入配置，无需手改 JSON）：
+同一套内核还以 **MCP 服务器** 形态提供。pi（经 pi-mcp-adapter）、Cursor、VS Code Copilot 等客户端都读取项目根目录的标准 `.mcp.json`，所以接入 = 在项目里生成一个文件：
 
 ```bash
-git clone https://github.com/caikiji/pi-ipython-kernel
-cd pi-ipython-kernel
-node mcp/install.mjs            # --cwd <工作区> 指定内核工作区（默认当前目录）
+cd /path/to/your/project
+node /path/to/pi-ipython-kernel/mcp/install.mjs
 ```
 
-然后完全退出并重启 Claude Desktop，工具列表即出现 5 个 kernel 工具。卸载：`node mcp/install.mjs --uninstall`。其他客户端可用 `--config <路径>` 写入自定义配置。
-
-手动接入（等价于脚本生成的内容）：
+生成的 `.mcp.json`（cwd 即项目本身，也就是内核工作区）：
 
 ```json
 {
@@ -138,11 +133,13 @@ node mcp/install.mjs            # --cwd <工作区> 指定内核工作区（默�
     "kernel": {
       "command": "C:\\Program Files\\nodejs\\node.exe",
       "args": ["D:/path/to/pi-ipython-kernel/mcp/server.ts"],
-      "cwd": "D:/path/to/your/workspace"
+      "cwd": "D:/path/to/your/project"
     }
   }
 }
 ```
+
+pi 中 `/reload`（或新开会话）后生效，`/mcp` 可查看服务器列表；Cursor / Copilot 自动拾取，按需重载。卸载：`node /path/to/pi-ipython-kernel/mcp/install.mjs --uninstall`（也可 `--config <路径>` 写入自定义配置文件）。
 
 要点：
 
