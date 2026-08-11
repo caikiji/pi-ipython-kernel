@@ -118,32 +118,40 @@ pi install git:github.com/caikiji/pi-ipython-kernel@main -l
 
 ## MCP 模式（兼容任意 harness）
 
-同一套内核还以 **MCP 服务器** 形态提供，Claude Desktop / Cursor 等任意支持 MCP 的客户端都能用：
+同一套内核还以 **MCP 服务器** 形态提供，Claude Desktop / Cursor 等任意支持 MCP 的客户端都能用。
 
+**一键接入 Claude Desktop**（自动定位服务器路径并写入配置，无需手改 JSON）：
+
+```bash
+git clone https://github.com/caikiji/pi-ipython-kernel
+cd pi-ipython-kernel
+node mcp/install.mjs            # --cwd <工作区> 指定内核工作区（默认当前目录）
 ```
-node mcp/server.ts        # Node ≥ 23.6；22.18+ 加 --experimental-strip-types
-```
 
-- **工作区 = 服务器进程的 cwd**：`.kernel/` 全局层与 init 脚本（kernel_init.py）都取自 cwd，与 pi 插件语义一致
-- **工具**：kernel_run / kernel_ls / kernel_get / kernel_publish / kernel_delete（与 pi 插件同名同参数同输出格式）
-- **资源**：`kernel://registry` 暴露 init 脚本注册表摘要（对应 pi 插件的 before_agent_start 注入，MCP 里由 agent 按需读取）
-- 托管运行时引导、超时中断、SQLite 全局层、重放层全部复用，零改动
+然后完全退出并重启 Claude Desktop，工具列表即出现 5 个 kernel 工具。卸载：`node mcp/install.mjs --uninstall`。其他客户端可用 `--config <路径>` 写入自定义配置。
 
-Claude Desktop（`claude_desktop_config.json`）：
+手动接入（等价于脚本生成的内容）：
 
 ```json
 {
   "mcpServers": {
     "kernel": {
-      "command": "node",
-      "args": ["C:/Users/<you>/.pi/agent/git/github.com/caikiji/pi-ipython-kernel/mcp/server.ts"],
+      "command": "C:\\Program Files\\nodejs\\node.exe",
+      "args": ["D:/path/to/pi-ipython-kernel/mcp/server.ts"],
       "cwd": "D:/path/to/your/workspace"
     }
   }
 }
 ```
 
-首次调用会触发托管运行时引导（约 1-2 分钟，之后缓存）；不想下载就在 `env` 里设 `PI_KERNEL_PYTHON` 复用本地 Python。
+要点：
+
+- **工作区 = 服务器进程的 cwd**：`.kernel/` 全局层与 init 脚本（kernel_init.py）都取自 cwd，与 pi 插件语义一致
+- **工具**：kernel_run / kernel_ls / kernel_get / kernel_publish / kernel_delete（与 pi 插件同名同参数同输出格式）
+- **资源**：`kernel://registry` 暴露 init 脚本注册表摘要（对应 pi 插件的 before_agent_start 注入，MCP 里由 agent 按需读取）
+- 托管运行时引导、超时中断、SQLite 全局层、重放层全部复用，零改动
+- 首次调用会触发托管运行时引导（约 1-2 分钟，之后缓存）；不想下载就在运行 install 前设好 `PI_KERNEL_PYTHON` 复用本地 Python
+- 直接跑服务器：`node mcp/server.ts`（Node ≥ 23.6；22.18-23.5 加 `--experimental-strip-types`）
 ## 开发
 
 ```bash
