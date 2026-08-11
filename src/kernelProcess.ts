@@ -64,7 +64,9 @@ export class KernelProcess {
 	}
 
 	private async start(): Promise<void> {
-		const cmd = this.opts.pythonCmd ?? process.env.PI_KERNEL_PYTHON ?? "python3";
+		// Windows has no `python3` launcher (only python / py); pick the
+		// platform default when nothing more specific was configured.
+		const cmd = this.opts.pythonCmd ?? process.env.PI_KERNEL_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
 		const child = spawn(cmd, [this.opts.serverPath], {
 			cwd: this.opts.cwd,
 			stdio: ["pipe", "pipe", "inherit"],

@@ -89,8 +89,10 @@ class ExecEngineTest(unittest.TestCase):
         self.assertTrue(result.incomplete)
 
     def test_keyboard_interrupt(self):
+        # raise_signal works on both POSIX and Windows: os.kill(SIGINT)
+        # terminates the whole test process on Windows (exit code 2).
         result = self.engine.run(
-            "import os, signal\nos.kill(os.getpid(), signal.SIGINT)\nx = 1"
+            "import signal\nsignal.raise_signal(signal.SIGINT)\nx = 1"
         )
         self.assertTrue(result.interrupted)
 
@@ -302,7 +304,7 @@ class RpcServerTest(unittest.TestCase):
     def test_hello_includes_cwd(self):
         srv = self.make_server()
         hello = srv.handle({"method": "hello"})
-        self.assertTrue(hello["cwd"].startswith("/"))
+        self.assertTrue(os.path.isabs(hello["cwd"]))
     def test_unknown_method(self):
         srv = self.make_server()
         self.assertIsNone(srv.handle({"method": "nope"}))

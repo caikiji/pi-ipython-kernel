@@ -14,6 +14,8 @@ import { tmpdir } from "node:os";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const serverPath = resolve(root, "python/server.py");
+// Windows has no `python3` launcher; PI_KERNEL_PYTHON overrides either way.
+const PY = process.env.PI_KERNEL_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
 
 const { JsonRpcClient } = await import("../src/rpc.ts");
 const { KernelProcess } = await import("../src/kernelProcess.ts");
@@ -201,7 +203,7 @@ await test("format: delete result", () => {
 
 await test("rpc: call roundtrip against real server", async () => {
 	const { spawn } = await import("node:child_process");
-	const proc = spawn("python3", [serverPath], { stdio: ["pipe", "pipe", "inherit"] });
+	const proc = spawn(PY, [serverPath], { stdio: ["pipe", "pipe", "inherit"] });
 	const client = new JsonRpcClient(proc);
 	try {
 		const hello = await client.call("hello", {}, { timeoutMs: 5_000 });
@@ -217,7 +219,7 @@ await test("rpc: call roundtrip against real server", async () => {
 
 await test("rpc: timeout fires onTimeout and late response resolves", async () => {
 	const { spawn } = await import("node:child_process");
-	const proc = spawn("python3", [serverPath], { stdio: ["pipe", "pipe", "inherit"] });
+	const proc = spawn(PY, [serverPath], { stdio: ["pipe", "pipe", "inherit"] });
 	const client = new JsonRpcClient(proc);
 	let interrupted = false;
 	try {
@@ -230,13 +232,20 @@ await test("rpc: timeout fires onTimeout and late response resolves", async () =
 				proc.kill("SIGINT");
 			},
 		});
-		const res = await call;
+		if (process.platform === "win32") {
+			// SIGINT cannot be delivered to a child process on Windows: the
+			// process is terminated and the pending call is rejected
+			// (see kernelProcess.ts: win32 timeout strategy is kill).
+			await assert.rejects(call);
+		} else {
+			const res = await call;
+			assert.equal(res.timedOut, true);
+			assert.equal(res.result.interrupted, true);
+			// kernel still alive and serving
+			const again = await client.call("execute", { code: "1 + 1" }, { timeoutMs: 5_000 });
+			assert.match(again.result.output, /2/);
+		}
 		assert.equal(interrupted, true, "onTimeout should have fired");
-		assert.equal(res.timedOut, true);
-		assert.equal(res.result.interrupted, true);
-		// kernel still alive and serving
-		const again = await client.call("execute", { code: "1 + 1" }, { timeoutMs: 5_000 });
-		assert.match(again.result.output, /2/);
 	} finally {
 		proc.kill("SIGKILL");
 	}
@@ -269,10 +278,17 @@ await test("kernel: timeout interrupts (SIGINT) and kernel keeps serving", async
 	const wd = workspace();
 	const k = new KernelProcess({ serverPath, cwd: wd });
 	try {
-		const r = await k.execute("import time\ntime.sleep(30)", 700);
-		assert.equal(r.timedOut, true);
-		assert.equal(r.result.interrupted, true);
-		// still serving with state intact
+		if (process.platform === "win32") {
+			// SIGINT is not catchable on Windows: the timeout strategy is
+			// kill + auto-respawn (see kernelProcess.ts). The timed-out
+			// call rejects; the next call respawns a fresh kernel.
+			await assert.rejects(k.execute("import time\ntime.sleep(30)", 700));
+		} else {
+			const r = await k.execute("import time\ntime.sleep(30)", 700);
+			assert.equal(r.timedOut, true);
+			assert.equal(r.result.interrupted, true);
+		}
+		// still serving (respawned on Windows) with state intact
 		const again = await k.execute("x = 5");
 		assert.deepEqual(again.result.new, [{ name: "x", type: "int" }]);
 	} finally {
