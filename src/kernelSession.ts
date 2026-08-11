@@ -30,7 +30,7 @@ export class KernelSession {
 	 * building their own process. */
 	private starting?: Promise<void>;
 	/** Managed python resolved once per session; undefined = system python3. */
-	private runtimePython?: string;
+	/** Python resolved once per session: PI_KERNEL_PYTHON override, else the managed runtime; undefined = system python fallback. */
 	private runtimeFailure?: string;
 	private fallbackNotified = false;
 	private initNotified = false;
@@ -66,7 +66,7 @@ export class KernelSession {
 		let text = "";
 		if (this.runtimeFailure && !this.fallbackNotified) {
 			this.fallbackNotified = true;
-			text += `[runtime] managed python bootstrap failed; using system python3. ${this.runtimeFailure}\n\n`;
+			text += `[runtime] managed python bootstrap failed; falling back to a system python. ${this.runtimeFailure}\n\n`;
 		}
 		const init = this.kernel?.initReport;
 		if (init?.path && !this.initNotified) {
@@ -92,7 +92,15 @@ export class KernelSession {
 		// cwd changed: drop the old workspace kernel before spawning.
 		void this.kernel?.killSync();
 		let pythonCmd: string | undefined;
-		if (this.runtimePython === undefined && !this.runtimeFailure) {
+		const envPython = process.env.PI_KERNEL_PYTHON;
+		if (envPython) {
+			// First-class override: reuse a local interpreter and skip the
+			// managed bootstrap entirely (no uv download, no venv, no pip
+			// install). The user owns that environment; IPython is optional
+			// (the exec engine fallback covers its absence).
+			this.runtimePython = envPython;
+			pythonCmd = envPython;
+		} else if (this.runtimePython === undefined && !this.runtimeFailure) {
 			try {
 				const manager = new RuntimeManager({ manifestPath: this.opts.manifestPath, onStage: onStage ?? this.opts.onStage });
 				this.runtimePython = await manager.ensure();
