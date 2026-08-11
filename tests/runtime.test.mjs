@@ -68,13 +68,17 @@ await test("stateMatches: version and deps hash", () => {
 
 // ------------------------------------------------------------ bootstrap
 
+const WIN = process.platform === "win32";
+// Path of the venv python inside the cache, per platform (venv layout).
+const VENV_PY = join("venv", WIN ? "Scripts" : "bin", WIN ? "python.exe" : "python");
+
 function fakeWorkspace() {
 	const wd = mkdtempSync(join(tmpdir(), "rt-ws-"));
 	const key = platformKey() ?? "aarch64-apple-darwin";
 	const uvDir = join(wd, `uv-${key}`);
 	mkdirSync(uvDir, { recursive: true });
-	const uv = join(uvDir, "uv");
-	writeFileSync(uv, "#!/bin/sh\necho fake-uv \"$@\"\n");
+	const uv = join(uvDir, WIN ? "uv.exe" : "uv");
+	writeFileSync(uv, WIN ? "fake uv\n" : "#!/bin/sh\necho fake-uv \"$@\"\n");
 	chmodSync(uv, 0o755);
 	return { wd, key, uvDir, uv };
 }
@@ -91,19 +95,33 @@ function makeManager(cacheDir, { onRun, downloader } = {}) {
 			cacheDir,
 			onStage: () => {},
 			download: async (_url, dest) => {
-				// copy the pre-built fake tarball into place
+				// The fake downloader must produce an archive the platform's
+				// extractArchive can actually read: real zip via PowerShell
+				// on Windows (bsdtar cannot read the real uv zips), tar.gz
+				// via tar elsewhere.
 				const { execFileSync } = await import("node:child_process");
-				execFileSync("tar", ["-czf", dest, "-C", ws.wd, `uv-${ws.key}`], { stdio: "ignore" });
+				if (WIN) {
+					const q = (p) => p.replaceAll("'", "''");
+					execFileSync("powershell", [
+						"-NoProfile",
+						"-Command",
+						`Compress-Archive -Path '${q(join(ws.wd, `uv-${ws.key}`, "*"))}' -DestinationPath '${q(dest)}' -Force`,
+					], { stdio: "ignore" });
+				} else {
+					execFileSync("tar", ["-czf", "fake-uv.tar.gz", `uv-${ws.key}`], { cwd: ws.wd, stdio: "ignore" });
+					const { copyFileSync } = await import("node:fs");
+					copyFileSync(join(ws.wd, "fake-uv.tar.gz"), dest);
+				}
 			},
 			run: async (cmd, args) => {
 				calls.push([cmd, args]);
 				if (args[0] === "python" && args[1] === "install") {
 					mkdirSync(join(cacheDir, "python"), { recursive: true });
 				} else if (args[0] === "venv") {
-					const venvDir = join(cacheDir, "venv", "bin");
+					const venvDir = join(cacheDir, "venv", WIN ? "Scripts" : "bin");
 					mkdirSync(venvDir, { recursive: true });
-					writeFileSync(join(venvDir, "python"), "#!/bin/sh\necho fake-python\n");
-					chmodSync(join(venvDir, "python"), 0o755);
+					writeFileSync(join(venvDir, WIN ? "python.exe" : "python"), WIN ? "fake" : "#!/bin/sh\necho fake-python\n");
+					chmodSync(join(venvDir, WIN ? "python.exe" : "python"), 0o755);
 				} else if (args[0] === "pip") {
 					// no-op
 				}
@@ -118,7 +136,7 @@ await test("bootstrap: full sequence produces venv python + state.json", async (
 	const { calls, manager } = makeManager(cacheDir);
 	try {
 		const python = await manager.ensure();
-		assert.ok(python.endsWith(join("venv", "bin", "python")));
+		assert.ok(python.endsWith(VENV_PY));
 		assert.equal(existsSync(python), true);
 		// sequence: python install -> venv -> pip install
 		assert.deepEqual(calls.map(([c, a]) => a[0]), ["python", "venv", "pip"]);
@@ -141,7 +159,7 @@ await test("bootstrap: cached runtime is reused without rerunning uv", async () 
 		calls.length = 0;
 		const python = await manager.ensure();
 		assert.equal(calls.length, 0, "no uv calls on cached path");
-		assert.ok(python.endsWith(join("venv", "bin", "python")));
+		assert.ok(python.endsWith(VENV_PY));
 	} finally {
 		rmSync(cacheDir, { recursive: true, force: true });
 	}
@@ -177,10 +195,9 @@ await test("bootstrap: concurrent temp dir is waited on, then reused", async () 
 		mkdirSync(join(cacheDir, `.tmp-${process.pid}`), { recursive: true });
 		// While we poll, the "winner" finishes: artifacts + state.json appear.
 		setTimeout(() => {
-			const venvBin = join(cacheDir, "venv", "bin");
+			const venvBin = join(cacheDir, "venv", WIN ? "Scripts" : "bin");
 			mkdirSync(venvBin, { recursive: true });
-			writeFileSync(join(venvBin, "python"), "#!/bin/sh\n");
-			chmodSync(join(venvBin, "python"), 0o755);
+			writeFileSync(join(venvBin, WIN ? "python.exe" : "python"), WIN ? "fake" : "#!/bin/sh\n");
 			writeFileSync(
 				join(cacheDir, "state.json"),
 				JSON.stringify({
@@ -192,7 +209,7 @@ await test("bootstrap: concurrent temp dir is waited on, then reused", async () 
 			rmSync(join(cacheDir, `.tmp-${process.pid}`), { recursive: true, force: true });
 		}, 1_500);
 		const python = await manager.ensure();
-		assert.ok(python.endsWith(join("venv", "bin", "python")));
+		assert.ok(python.endsWith(VENV_PY));
 		assert.equal(calls.length, 0, "reused the concurrent winner's runtime, no uv calls");
 	} finally {
 		rmSync(cacheDir, { recursive: true, force: true });
@@ -200,11 +217,8 @@ await test("bootstrap: concurrent temp dir is waited on, then reused", async () 
 });
 
 await test("bootstrap: orphaned temp dir is reaped, not waited on", async () => {
-	// Windows cannot probe process liveness; the reaping path is POSIX-only.
-	if (process.platform === "win32") {
-		console.log("skip - orphan reaping is POSIX-only");
-		return;
-	}
+	// process.kill(pid, 0) probes liveness on Windows too (ESRCH for a
+	// dead pid), so the reaping path works everywhere.
 	const cacheDir = mkdtempSync(join(tmpdir(), "rt-cache-"));
 	const { calls, manager } = makeManager(cacheDir);
 	try {
@@ -214,7 +228,7 @@ await test("bootstrap: orphaned temp dir is reaped, not waited on", async () => 
 		// 5-minute wait window. 2147483647 exceeds any real pid space.
 		mkdirSync(join(cacheDir, ".tmp-2147483647"), { recursive: true });
 		const python = await manager.ensure();
-		assert.ok(python.endsWith(join("venv", "bin", "python")));
+		assert.ok(python.endsWith(VENV_PY));
 		assert.ok(calls.length > 0, "bootstrapped after reaping the orphan");
 	} finally {
 		rmSync(cacheDir, { recursive: true, force: true });

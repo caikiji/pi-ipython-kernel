@@ -23,7 +23,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileP = promisify(execFile);
@@ -286,9 +286,11 @@ function reapStaleBootstrapTemp(cacheDir: string): boolean {
 
 function isProcessAlive(pid: number): boolean {
 	// process.kill(pid, 0) probes existence without delivering a signal.
-	// Windows cannot probe (signal 0 unsupported), so stay conservative
-	// and treat the owner as alive: the original wait behavior applies.
-	if (process.platform === "win32") return true;
+	// Works on Windows too (OpenProcess-based): a dead pid raises ESRCH.
+	// Previously the win32 branch returned true unconditionally, which
+	// left orphaned bootstrap temp dirs (owner killed mid-bootstrap) in
+	// place forever — every later ensure() then stalled the full
+	// concurrent-wait window before giving up.
 	try {
 		process.kill(pid, 0);
 		return true;
@@ -300,25 +302,62 @@ function isProcessAlive(pid: number): boolean {
 }
 
 async function extractArchive(archive: string, dest: string, key: string, kind: "tar.gz" | "zip"): Promise<void> {
-	// macOS/Linux ship tar (handles .tar.gz); Windows 10+ ships bsdtar (handles zip).
-	await execFileP("tar", ["-xzf", archive, "-C", dest]);
+	if (process.platform === "win32" && kind === "zip") {
+		// Two Windows bsdtar (tar.exe) problems: it rejects absolute
+		// drive-letter paths (C:\... is read as a remote host) and it
+		// cannot read the uv release zips (zip64/data-descriptor entries).
+		// PowerShell Expand-Archive handles both. Unlike the mac/linux
+		// tar.gz (top-level uv-<key>/ dir), the Windows zip has its
+		// executables at the archive root — extract into uv-<key>/ so the
+		// binary path below is uniform across platforms.
+		const q = (p: string) => p.replaceAll("'", "''");
+		await execFileP("powershell", [
+			"-NoProfile",
+			"-Command",
+			`Expand-Archive -LiteralPath '${q(archive)}' -DestinationPath '${q(join(dest, `uv-${key}`))}' -Force`,
+		]);
+		return;
+	}
+	// macOS/Linux ship tar (handles .tar.gz); run it with cwd=dest and the
+	// archive by basename (relative) so drive-letter paths never appear.
+	mkdirSync(dest, { recursive: true });
+	await execFileP("tar", ["-xzf", basename(archive)], { cwd: dest });
 	if (kind === "zip") {
 		// bsdtar understands zip; on systems without it, fall back to unzip
 		if (!existsSync(join(dest, `uv-${key}`))) {
-			await execFileP("unzip", ["-q", archive, "-d", dest]);
+			await execFileP("unzip", ["-q", basename(archive), "-d", dest]);
 		}
 	}
 }
 
+// A stalled download must not hang the bootstrap (and with it the first
+// agent turn) forever: bound each attempt and retry a couple of times.
+const DOWNLOAD_TIMEOUT_MS = 120_000;
+const DOWNLOAD_RETRIES = 2;
+
 /** Download url to dest, then verify dest against the sha256 published at verifyUrl. */
 export async function downloadWithSha256(url: string, dest: string, verifyUrl: string): Promise<void> {
-	const res = await fetch(url);
+	let lastErr: Error | undefined;
+	for (let attempt = 0; attempt <= DOWNLOAD_RETRIES; attempt++) {
+		if (attempt > 0) await sleep(2_000 * attempt);
+		try {
+			await downloadOnce(url, dest, verifyUrl);
+			return;
+		} catch (err) {
+			lastErr = err instanceof Error ? err : new Error(String(err));
+		}
+	}
+	throw new RuntimeError(`download failed after ${DOWNLOAD_RETRIES + 1} attempts: ${url} -> ${lastErr.message}`);
+}
+
+async function downloadOnce(url: string, dest: string, verifyUrl: string): Promise<void> {
+	const res = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
 	if (!res.ok) {
 		throw new RuntimeError(`download failed: ${url} -> HTTP ${res.status}`);
 	}
 	const buf = Buffer.from(await res.arrayBuffer());
 	const sum = createHash("sha256").update(buf).digest("hex");
-	const check = await fetch(verifyUrl);
+	const check = await fetch(verifyUrl, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
 	if (!check.ok) {
 		throw new RuntimeError(`cannot fetch checksum ${verifyUrl} -> HTTP ${check.status}`);
 	}
