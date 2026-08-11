@@ -122,22 +122,26 @@ pi install git:github.com/caikiji/pi-ipython-kernel@main -l
 
 ```bash
 cd /path/to/your/project
-node /path/to/pi-ipython-kernel/mcp/install.mjs
+git clone https://github.com/caikiji/pi-ipython-kernel vendor/pi-ipython-kernel   # 可选：vendor 进项目，配置即可提交
+node vendor/pi-ipython-kernel/mcp/install.mjs
 ```
 
-生成的 `.mcp.json`（cwd 即项目本身，也就是内核工作区）：
+生成的 `.mcp.json` 是**跨平台通用写法**（Windows / macOS 同一份配置）：
 
 ```json
 {
   "mcpServers": {
     "kernel": {
-      "command": "C:\\Program Files\\nodejs\\node.exe",
-      "args": ["D:/path/to/pi-ipython-kernel/mcp/server.ts"],
-      "cwd": "D:/path/to/your/project"
+      "command": "node",
+      "args": ["--experimental-strip-types", "vendor/pi-ipython-kernel/mcp/server.ts"]
     }
   }
 }
 ```
+
+- `command: "node"` 走 PATH，不写死 `C:\...` 之类机器路径
+- repo 在项目内 → 相对路径，`.mcp.json` 可提交，队友克隆即用；repo 在项目外 → 自动改用正斜杠绝对路径（两平台通用）
+- 不写 `cwd`：客户端默认工作目录（pi 即项目根）就是内核工作区
 
 pi 中 `/reload`（或新开会话）后生效，`/mcp` 可查看服务器列表；Cursor / Copilot 自动拾取，按需重载。卸载：`node /path/to/pi-ipython-kernel/mcp/install.mjs --uninstall`（也可 `--config <路径>` 写入自定义配置文件）。
 

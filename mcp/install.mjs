@@ -1,20 +1,28 @@
 #!/usr/bin/env node
 /**
- * One-command MCP registration for the kernel server, project-scoped.
+ * One-command MCP registration for the kernel server, project-scoped and
+ * cross-platform (Windows / macOS / Linux).
  *
  * Writes a standard .mcp.json into the project root — the shared,
  * project-level MCP config convention that pi (via pi-mcp-adapter),
  * Cursor, VS Code Copilot and other MCP clients pick up automatically.
- * No absolute paths to type by hand, nothing global to configure:
  *
- *   git clone https://github.com/caikiji/pi-ipython-kernel
+ * The generated entry is deliberately portable:
+ *   - "command": "node"          (resolved via PATH, no C:\... hardcoding)
+ *   - relative server path when the repo lives inside the project, so the
+ *     .mcp.json can be committed and works for every teammate on any OS
+ *   - no "cwd" field: the client's default working directory (the project
+ *     root, for pi) becomes the kernel workspace
+ *
+ * Recommended layout (fully portable, committable):
+ *
  *   cd /path/to/your/project
- *   node /path/to/pi-ipython-kernel/mcp/install.mjs
+ *   git clone https://github.com/caikiji/pi-ipython-kernel vendor/pi-ipython-kernel
+ *   node vendor/pi-ipython-kernel/mcp/install.mjs
  *
- * This creates <project>/.mcp.json with a "kernel" server whose cwd is
- * the project itself — the kernel workspace (its .kernel/ store and
- * kernel_init.py live there). Restart pi (or run /reload; pi's /mcp
- * command lists the server) and the kernel tools are available.
+ * If the repo is elsewhere on disk, an absolute path with forward slashes
+ * is used instead (works on Windows and macOS alike) and the entry stays
+ * machine-local.
  *
  * Options:
  *   --cwd <path>      Project to write .mcp.json into (default: the
@@ -27,11 +35,10 @@
  * Pure Node, no dependencies.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const serverPath = resolve(root, "mcp", "server.ts");
 
 // ------------------------------------------------------------- CLI args
 
@@ -65,21 +72,29 @@ function writeConfig(cfg) {
 	writeFileSync(configPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
 }
 
+// Portable server spec. `node` is resolved via PATH on every OS. The
+// --experimental-strip-types flag is accepted on all Node 22.18+ (a no-op
+// where stripping is default-on), so one entry works everywhere.
+function serverSpec() {
+	const serverFile = resolve(root, "mcp", "server.ts");
+	// Repo inside the project? Use a relative path so the config is
+	// committable and portable (args resolve against the client's
+	// default cwd = project root). Otherwise an absolute forward-slash
+	// path, which both Windows and macOS understand.
+	const rel = relative(project, serverFile);
+	const path = rel && !rel.startsWith("..") && !rel.startsWith(`..${sep}`) ? rel.split(sep).join("/") : serverFile.split(sep).join("/");
+	return { command: "node", args: ["--experimental-strip-types", path] };
+}
+
 const nodeMajor = Number(process.versions.node.split(".")[0]);
 if (nodeMajor < 22) {
 	console.error(`This server needs Node >= 22.18 (you have ${process.versions.node}).`);
 	process.exit(1);
 }
-// Node 23.6+ strips types by default; 22.18-23.5 needs the flag.
-const flag = nodeMajor >= 24 || (nodeMajor === 23 && Number(process.versions.node.split(".")[1]) >= 6) ? null : "--experimental-strip-types";
 
 const cfg = readConfig();
 const mcpServers = (cfg.mcpServers ??= {});
-const entry = {
-	command: process.execPath,
-	args: flag ? [flag, serverPath] : [serverPath],
-	cwd: project,
-};
+const entry = serverSpec();
 if (process.env.PI_KERNEL_PYTHON) {
 	entry.env = { PI_KERNEL_PYTHON: process.env.PI_KERNEL_PYTHON };
 }
@@ -95,10 +110,12 @@ const prev = mcpServers[name];
 mcpServers[name] = entry;
 writeConfig(cfg);
 
+const portable = !entry.args[1].includes(":") && !entry.args[1].startsWith("/") && !entry.args[1].startsWith("\\\\");
 console.log(`Registered MCP server "${name}" in ${configPath}`);
 console.log(`  command : ${entry.command}`);
 console.log(`  args    : ${entry.args.join(" ")}`);
-console.log(`  cwd     : ${project}   (the kernel workspace)`);
+console.log(`  workspace: the project directory (client default cwd)`);
+console.log(portable ? "  layout  : relative path — this .mcp.json is committable and works for teammates on any OS" : "  layout  : absolute path (repo is outside the project)");
 if (prev) console.log(`(replaced a previous "${name}" entry)`);
 console.log("");
 console.log("Next steps:");
