@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s tests/python -p 'test_*.py'
 """
 
+import json
 import os
 import signal
 import sys
@@ -308,6 +309,37 @@ class RpcServerTest(unittest.TestCase):
     def test_unknown_method(self):
         srv = self.make_server()
         self.assertIsNone(srv.handle({"method": "nope"}))
+
+    def test_serve_line_malformed_json_is_parse_error(self):
+        srv = self.make_server()
+        resp = json.loads(srv.serve_line("GARBAGE_NOT_JSON"))
+        self.assertEqual(resp["id"], None)
+        self.assertEqual(resp["error"]["code"], "parse")
+
+    def test_serve_line_non_object_is_parse_error(self):
+        srv = self.make_server()
+        for line in ["[1, 2, 3]", '"a string"', "42", "null"]:
+            resp = json.loads(srv.serve_line(line))
+            self.assertEqual(resp["id"], None, line)
+            self.assertEqual(resp["error"]["code"], "parse", line)
+
+    def test_serve_line_keeps_serving_after_garbage(self):
+        srv = self.make_server()
+        json.loads(srv.serve_line("GARBAGE"))  # must not raise
+        resp = json.loads(srv.serve_line('{"id": 1, "method": "execute", "params": {"code": "1 + 1"}}'))
+        self.assertEqual(resp["id"], 1)
+        self.assertIn("2", resp["result"]["output"])
+
+    def test_serve_line_notification_returns_none(self):
+        srv = self.make_server()
+        self.assertIsNone(srv.serve_line('{"method": "ping"}'))
+        self.assertIsNone(srv.serve_line('{"method": "execute", "params": {"code": "1"}}'))
+
+    def test_serve_line_dispatch_error_mapped(self):
+        srv = self.make_server()
+        resp = json.loads(srv.serve_line('{"id": 7, "method": "get", "params": {"name": "missing"}}'))
+        self.assertEqual(resp["id"], 7)
+        self.assertEqual(resp["error"]["code"], "not_found")
 
     # -- init script replay -------------------------------------------------
 

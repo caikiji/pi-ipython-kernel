@@ -464,6 +464,32 @@ class Server:
             except OSError:
                 pass  # next RPC re-checks from scratch
 
+    def serve_line(self, line: str) -> str | None:
+        """Handle one decoded request line; return the JSON response line
+        to write, or None when nothing should be written (notifications).
+
+        A malformed line (stray debug output, pipe corruption) is answered
+        with a parse error — it must never kill the process, because a dead
+        kernel loses the whole session namespace."""
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            return json.dumps({"id": None, "error": {"code": "parse", "message": "invalid JSON request"}})
+        if not isinstance(msg, dict):
+            return json.dumps({"id": None, "error": {"code": "parse", "message": "request must be a JSON object"}})
+        rid = msg.get("id")
+        try:
+            result = self.handle(msg)
+            if result is None and rid is not None:
+                result = {"ok": True}
+            if isinstance(result, dict) and isinstance(result.get("error"), dict):
+                payload = {"id": rid, "error": result["error"]} if rid is not None else None
+            else:
+                payload = {"id": rid, "result": result} if rid is not None else None
+        except Exception as exc:  # noqa: BLE001
+            payload = {"id": rid, "error": {"code": "internal", "message": str(exc)}}
+        return json.dumps(payload) if payload is not None else None
+
     def handle(self, msg: dict) -> dict | None:
         method = msg.get("method")
         params = msg.get("params") or {}
@@ -849,24 +875,12 @@ def main() -> None:
             line = raw.decode('utf-8', errors='replace').strip()
             if not line:
                 continue
-            msg = json.loads(line)
-            rid = msg.get('id')
-            try:
-                result = server.handle(msg)
-                if result is None and rid is not None:
-                    result = {'ok': True}
-                if isinstance(result, dict) and isinstance(result.get('error'), dict):
-                    payload = {'id': rid, 'error': result['error']} if rid is not None else None
-                else:
-                    payload = {'id': rid, 'result': result} if rid is not None else None
-            except Exception as exc:  # noqa: BLE001
-                payload = {'id': rid, 'error': {'code': 'internal', 'message': str(exc)}}
+            payload = server.serve_line(line)
             if payload is not None:
-                stdout.write((json.dumps(payload) + '\n').encode('utf-8'))
+                stdout.write((payload + '\n').encode('utf-8'))
                 stdout.flush()
         except KeyboardInterrupt:
             continue
-
 
 if __name__ == '__main__':
     main()
