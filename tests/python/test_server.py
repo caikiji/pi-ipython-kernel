@@ -478,6 +478,26 @@ class RpcServerTest(unittest.TestCase):
         self.assertEqual([e["name"] for e in ls["registered"]], ["a"])
         self.assertEqual(ls["registered"][0]["description"], "two")
 
+    def test_init_script_hot_reload_keeps_imported_modules(self):
+        # Regression: `import queue` rebinds the same module object, so the
+        # name never shows up in after_vars (added+changed only). The reload
+        # cleanup then mistook it for a dropped var and deleted it, breaking
+        # registered callables that reference the module (e.g. GameClient
+        # using socket/queue after a hot reload).
+        srv = self.init_server("import queue\nV = 1\n")
+        srv.handle({"method": "hello"})
+        out = srv.handle({"method": "execute", "params": {"code": "queue"}})
+        self.assertNotIn("NameError", out["error"])
+        with open(self.init_script_path(srv), "w") as f:
+            f.write("import queue\nV = 2\n")
+        ls = srv.handle({"method": "ls", "params": {"scope": "session"}})
+        rel = ls["reload"]
+        self.assertEqual(rel["error"], "")
+        self.assertNotIn("queue", rel["vars_removed"])
+        out = srv.handle({"method": "execute", "params": {"code": "queue"}})
+        self.assertNotIn("NameError", out["error"])
+
+
     def test_ls_includes_registered(self):
         srv = self.make_server()
         srv.handle({"method": "execute", "params": {"code": "register('cfg', {'a': 1}, 'Config.')"}})

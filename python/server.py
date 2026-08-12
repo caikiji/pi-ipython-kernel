@@ -591,15 +591,22 @@ class Server:
             after_vars = (set(after_objs) - set(before_objs)) | {
                 n for n in before_objs.keys() & after_objs.keys() if before_objs[n] is not after_objs[n]
             }
+            # Names the new script binds at top level (static analysis:
+            # assign/def/import). after_vars (added+changed only) misses
+            # names whose binding is unchanged - e.g. `import queue`
+            # rebinds the same module object - and the post-exec namespace
+            # keeps stale leftovers from the old script. Static names get
+            # both right.
+            script_vars = _script_bound_names(code)
             # Script vars the new script dropped: remove only when the
             # binding is still the old script's object (a later user
             # assignment survives, like unregister).
             removed_vars = []
-            for name in sorted(before_vars - after_vars - after_registry):
+            for name in sorted(before_vars - script_vars - after_registry):
                 if ex._ns.get(name) is old_var_objs.get(name):
                     del ex._ns[name]
                     removed_vars.append(name)
-            ex._init_var_objs = {n: ex._ns[n] for n in after_vars}
+            ex._init_var_objs = {n: ex._ns[n] for n in script_vars}
             report["registered_added"] = sorted(after_registry - before_registry)
             report["registered_removed"] = sorted(stale)
             report["vars_added"] = sorted(after_vars - before_vars)
@@ -752,6 +759,37 @@ def _match_name(pattern: str, name: str) -> bool:
 
     return fnmatch.fnmatchcase(name, pattern)
 
+def _script_bound_names(code: str) -> set[str]:
+    """Top-level names a script binds (assign/augassign/def/class/import).
+
+    Static analysis, used by hot reload to tell "script still defines X"
+    from "old binding leftover in the namespace". Exec cannot tell them
+    apart: `import queue` rebinds the same module object (identity
+    unchanged), and a dropped name keeps its stale binding. Assignment
+    inside top-level if/for/try is ignored (rare; worst case a stale
+    binding survives, which is the safe direction)."""
+    names: set[str] = set()
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return names  # reload will fail and roll back; empty set is safe
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    names.add(t.id)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                names.add(a.asname or a.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                names.add(a.asname or a.name)
+    return names
+
 
 def find_init_script(workspace: str) -> str | None:
     """First existing init script candidate (workspace-relative), or None."""
@@ -772,7 +810,6 @@ def load_init_script(executor: Executor, workspace: str) -> dict | None:
         return None
     path = os.path.join(workspace, rel)
     before_registry = executor.registry_names()
-    before_vars = set(executor._snapshot_objs())
     try:
         with open(path, encoding="utf-8") as f:
             code = f.read()
@@ -783,7 +820,7 @@ def load_init_script(executor: Executor, workspace: str) -> dict | None:
         result = executor.run(code, display=False)
     finally:
         executor._replaying_init = False
-    executor._init_var_objs = {n: executor._ns[n] for n in set(executor._snapshot_objs()) - before_vars}
+    executor._init_var_objs = {n: executor._ns[n] for n in _script_bound_names(code)}
     registered = sorted(executor.registry_names() - before_registry)
     return {
         "path": rel,
