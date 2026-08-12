@@ -311,6 +311,7 @@ class GlobalStore:
             )"""
         )
         self.conn.commit()
+        self._hash_cache: dict[str, tuple[int, int, str]] = {}
 
     def _migrate(self) -> None:
         """Version-guard the schema via PRAGMA user_version. A database
@@ -468,10 +469,24 @@ class GlobalStore:
             return True, None
         if not os.path.exists(source_path):
             return False, f"source file missing: {source_path}"
-        if _file_sha256(source_path) != source_hash:
+        if self._source_sha256(source_path) != source_hash:
             return False, f"source file changed since publish ({source_path}); rebuild and re-publish"
         return True, None
 
+    def _source_sha256(self, path: str) -> str:
+        """Source-file hash with a stat fast path: recompute the full file
+        hash only when mtime or size changed since the last hash in this
+        process. stat still runs on every call, so a changed file is never
+        missed — the cache only skips re-reading bytes that cannot have
+        changed (same nanosecond mtime and same size)."""
+        st = os.stat(path)
+        key = (st.st_mtime_ns, st.st_size)
+        hit = self._hash_cache.get(path)
+        if hit is not None and hit[0] == key[0] and hit[1] == key[1]:
+            return hit[2]
+        digest = _file_sha256(path)
+        self._hash_cache[path] = (key[0], key[1], digest)
+        return digest
 
 def _file_sha256(path: str, chunk: int = 1 << 20) -> str:
     h = hashlib.sha256()

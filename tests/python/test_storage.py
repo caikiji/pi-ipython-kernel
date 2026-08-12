@@ -184,6 +184,21 @@ class GlobalStoreTest(unittest.TestCase):
         finally:
             storage.MAX_BLOB_SIZE = old
 
+    def test_source_hash_cache_invalidates_on_change(self):
+        src = os.path.join(self.wd, "src.txt")
+        with open(src, "w") as f:
+            f.write("v1")
+        h1 = self.store._source_sha256(src)
+        h2 = self.store._source_sha256(src)  # stat fast path hit
+        self.assertEqual(h1, h2)
+        import time
+
+        time.sleep(0.01)  # ensure mtime advances on coarse filesystems
+        with open(src, "w") as f:
+            f.write("v2")
+        h3 = self.store._source_sha256(src)
+        self.assertNotEqual(h1, h3, "a changed source file must be re-hashed")
+
     def test_staleness_check(self):
         src = os.path.join(self.wd, "src.txt")
         with open(src, "w") as f:
