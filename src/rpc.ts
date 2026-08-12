@@ -64,6 +64,12 @@ export class JsonRpcClient {
 		this.proc = proc;
 		this.rl = createInterface({ input: proc.stdout! });
 		this.rl.on("line", (line) => this.onLine(line));
+		// A dead kernel must never crash the host: writes to its stdin fail
+		// with EPIPE/EOF, which would otherwise surface as an unhandled
+		// 'error' event and take down the whole extension process. The exit
+		// handler below already rejects every pending call, so there is
+		// nothing to recover here — just swallow the noise.
+		proc.stdin!.on("error", () => {});
 		proc.on("exit", () => this.failAll(new ProcessKilledError()));
 		proc.on("error", (err) => this.failAll(new ProcessKilledError(`kernel process error: ${err.message}`)));
 	}

@@ -226,6 +226,9 @@ function errorResponse(id: unknown, code: number, message: string): unknown {
  * closes (client gone); onClose then runs (kernel shutdown).
  */
 export async function runStdio(protocol: McpProtocol, onClose?: () => Promise<void> | void): Promise<void> {
+	// A client that disconnects mid-write fails stdout with EPIPE; without
+	// a listener that is an unhandled 'error' event and crashes the server.
+	process.stdout.on("error", () => {});
 	const parser = new FrameParser();
 	const done = new Promise<void>((resolve_) => {
 		process.stdin.on("end", resolve_);

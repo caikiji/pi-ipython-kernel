@@ -251,8 +251,24 @@ await test("rpc: timeout fires onTimeout and late response resolves", async () =
 	}
 });
 
-// ---------------------------------------------------------- kernel process
+await test("rpc: dead process stdin write does not crash the host", async () => {
+	const { spawn } = await import("node:child_process");
+	const proc = spawn(PY, ["-c", "import sys; sys.exit(0)"], { stdio: ["pipe", "pipe", "inherit"] });
+	const client = new JsonRpcClient(proc);
+	// Wait for the child to die, then keep writing large payloads: without
+	// the stdin 'error' listener this used to raise an unhandled EPIPE/EOF
+	// 'error' event and crash the whole host process.
+	await new Promise((res) => proc.on("exit", res));
+	await assert.rejects(client.call("hello", {}, { timeoutMs: 1_000 }), (err) => err.name === "ProcessKilledError");
+	for (let i = 0; i < 5; i++) {
+		proc.stdin.write(JSON.stringify({ id: i, method: "execute", params: { code: "x".repeat(200_000) } }) + "\n");
+	}
+	// Surviving to this point is the assertion (an unhandled error would
+	// have killed this test process).
+	await new Promise((res) => setTimeout(res, 300));
+});
 
+// ---------------------------------------------------------- kernel process
 await test("kernel: lazy spawn, state persistence, respawn after kill", async () => {
 	const wd = workspace();
 	const k = new KernelProcess({ serverPath, cwd: wd });
@@ -274,18 +290,19 @@ await test("kernel: lazy spawn, state persistence, respawn after kill", async ()
 	}
 });
 
-await test("kernel: timeout interrupts (SIGINT) and kernel keeps serving", async () => {
+await test("kernel: timeout reports TIMEOUT semantics on every platform", async () => {
 	const wd = workspace();
 	const k = new KernelProcess({ serverPath, cwd: wd });
 	try {
+		const r = await k.execute("import time\ntime.sleep(30)", 700);
+		assert.equal(r.timedOut, true, "timed-out call must report timedOut, not throw");
 		if (process.platform === "win32") {
 			// SIGINT is not catchable on Windows: the timeout strategy is
-			// kill + auto-respawn (see kernelProcess.ts). The timed-out
-			// call rejects; the next call respawns a fresh kernel.
-			await assert.rejects(k.execute("import time\ntime.sleep(30)", 700));
+			// kill + auto-respawn (see kernelProcess.ts), so the call has
+			// no result and the next call respawns a fresh kernel.
+			assert.equal(r.result, undefined);
 		} else {
-			const r = await k.execute("import time\ntime.sleep(30)", 700);
-			assert.equal(r.timedOut, true);
+			// SIGINT interrupts the cell; the kernel keeps serving.
 			assert.equal(r.result.interrupted, true);
 		}
 		// still serving (respawned on Windows) with state intact
