@@ -65,7 +65,7 @@ const tools = [
 	{
 		name: "kernel_run",
 		description:
-			"Run Python in a full IPython environment that persists across calls: variables, imports and data stay alive. Rich output for DataFrames/arrays, magics (%timeit, ?), and a namespace diff. A trailing bare expression (e.g. `df`) prints like a REPL. Exceptions return as an error result with a traceback; the namespace is preserved. Timeout interrupts the call and the kernel keeps serving.",
+			"Run Python in a full IPython environment that persists across calls: variables, imports and data stay alive. Rich output for DataFrames/arrays, magics (%timeit, ?), and a namespace diff. A trailing bare expression (e.g. `df`) prints like a REPL. Exceptions return as an error result with a traceback; the namespace is preserved. A timeout interrupts the running cell (on Windows the kernel is killed and respawns fresh, losing session state).",
 		inputSchema: {
 			type: "object",
 			properties: {
