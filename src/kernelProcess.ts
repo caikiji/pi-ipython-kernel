@@ -93,14 +93,24 @@ export class KernelProcess {
 		// failure (missing interpreter) surfaces here as well.
 		// Cold start is slow (managed runtime imports ipython/pandas first
 		// time); give the handshake a wide window instead of failing fast.
-		const hello = await client.call("hello", {}, {
-			timeoutMs: this.opts.spawnTimeoutMs ?? 30_000,
-			graceMs: 15_000,
-		});
-		const init = (hello.result as { init?: { path?: string; error?: string; new?: Array<{ name: string }>; registered?: string[] } } | undefined)?.init;
-		this.helloInit = init?.path
-			? { path: init.path, error: init.error, registered: init.registered ?? (init.new ?? []).map((n) => n.name) }
-			: null;
+		try {
+			const hello = await client.call("hello", {}, {
+				timeoutMs: this.opts.spawnTimeoutMs ?? 30_000,
+				graceMs: 15_000,
+			});
+			const init = (hello.result as { init?: { path?: string; error?: string; new?: Array<{ name: string }>; registered?: string[] } } | undefined)?.init;
+			this.helloInit = init?.path
+				? { path: init.path, error: init.error, registered: init.registered ?? (init.new ?? []).map((n) => n.name) }
+				: null;
+		} catch (err) {
+			// A failed handshake must not leave a half-alive process behind:
+			// on a spawn failure (missing interpreter) no 'exit' event fires,
+			// so proc would stay set and every later call would reuse a dead
+			// client forever. Clean up so the next ensureStarted respawns
+			// from scratch (which also re-tries transient slow starts).
+			this.killSync();
+			throw err;
+		}
 	}
 
 

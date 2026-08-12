@@ -369,6 +369,24 @@ await test("kernel: unresponsive kernel escalates from SIGINT to kill", async ()
 		rmSync(wd, { recursive: true, force: true });
 	}
 });
+
+await test("kernel: failed spawn cleans up and retries on the next call", async () => {
+	const wd = workspace();
+	const k = new KernelProcess({ serverPath, cwd: wd, pythonCmd: "definitely-not-a-real-python-xyz" });
+	try {
+		await assert.rejects(k.execute("1"));
+		// A spawn failure fires no 'exit' event; without the cleanup in
+		// start() the stale process would stay 'running' forever and every
+		// later call would reuse its dead client.
+		assert.equal(k.running, false, "failed spawn must not leave a stale process behind");
+		// the next call retries the spawn (and fails fast again)
+		await assert.rejects(k.execute("1"));
+		assert.equal(k.running, false);
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
 await test("kernel: crash of user code does not kill process", async () => {
 	const wd = workspace();
 	const k = new KernelProcess({ serverPath, cwd: wd });
