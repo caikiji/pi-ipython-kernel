@@ -29,8 +29,8 @@ export class KernelSession {
 	/** In-flight spawn/rebuild; concurrent get() calls await it instead of
 	 * building their own process. */
 	private starting?: Promise<void>;
-	/** Managed python resolved once per session; undefined = system python3. */
 	/** Python resolved once per session: PI_KERNEL_PYTHON override, else the managed runtime; undefined = system python fallback. */
+	private runtimePython?: string;
 	private runtimeFailure?: string;
 	private fallbackNotified = false;
 	private initNotified = false;
