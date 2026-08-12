@@ -49,6 +49,21 @@ class SerializeTest(unittest.TestCase):
             self.assertIsInstance(back, (int, float, bool))
 
     @unittest.skipUnless(HAS_NUMPY, "numpy not installed")
+    def test_numpy_scalars_reject_non_roundtrippable_kinds(self):
+        import numpy as np
+
+        # datetime64 / timedelta64 / complex / string scalars cannot
+        # round-trip through JSON; check_type must raise a clean
+        # PublishError instead of blowing up in json.dumps later.
+        for bad in [np.datetime64("2020-01-01"), np.timedelta64(5, "D"), np.complex128(1 + 2j), np.bytes_(b"abc")]:
+            with self.assertRaises(PublishError):
+                storage.check_type(bad)
+        # uint64 with a value beyond int64 is preserved exactly
+        big = np.uint64(2**63)
+        fmt, blob = storage.serialize(big)
+        back = storage.deserialize(fmt, blob, storage.check_type(big))
+        self.assertEqual(back, 2**63)
+    @unittest.skipUnless(HAS_NUMPY, "numpy not installed")
     def test_numpy_ndarray(self):
         import numpy as np
 

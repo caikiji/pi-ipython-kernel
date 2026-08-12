@@ -87,18 +87,24 @@ def check_type(obj: Any) -> str:
         if isinstance(obj, _NUMPY.ndarray):
             return "ndarray"
         if isinstance(obj, _NUMPY.generic):
-            return "numpy_scalar"
+            # Only kinds whose item() round-trips through JSON are
+            # publishable. datetime64/timedelta64/complex/string scalars
+            # are rejected here with a clear error instead of blowing up
+            # in json.dumps later (which surfaced as a raw internal error).
+            kind = obj.dtype.kind
+            if kind in ("f", "b", "i", "u"):
+                return "numpy_scalar"
+            raise PublishError(
+                f"numpy scalar with dtype {obj.dtype} is not publishable; "
+                "supported: float/bool/int/uint scalars (e.g. np.float64). "
+                "Convert it to a native Python type or export to a file instead."
+            )
     if isinstance(obj, (int, float, str)):
         return type(obj).__name__
     if isinstance(obj, bytes):
         return "bytes"
     if isinstance(obj, datetime.datetime):
         return "datetime"
-    if _NUMPY is not None:
-        if isinstance(obj, _NUMPY.ndarray):
-            return "ndarray"
-        if isinstance(obj, _NUMPY.generic):
-            return "numpy_scalar"
     if _PANDAS is not None:
         if isinstance(obj, _PANDAS.DataFrame):
             return "DataFrame"
