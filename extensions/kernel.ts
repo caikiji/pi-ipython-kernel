@@ -82,7 +82,16 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve_) => setTimeou
 			const timeoutSec = Math.min(Math.max((params.timeout as number | undefined) ?? 30, 1), 300);
 			const proc = await session.get(ctx.cwd, stage(_onUpdate));
 			try {
-				const { timedOut, result } = await proc.execute(code, timeoutSec * 1000);
+				const { timedOut, result } = await proc.execute(code, timeoutSec * 1000, _signal);
+				if (_signal?.aborted) {
+					// The harness cancelled the tool call mid-flight; the
+					// running cell was interrupted (SIGINT) or, on Windows,
+					// the kernel was killed (respawns on the next call).
+					return {
+						content: [{ type: "text", text: "kernel_run cancelled: the call was aborted; the running cell was interrupted." }],
+						details: { tool: "kernel_run", cancelled: true },
+					};
+				}
 				if (!result) {
 					if (timedOut) {
 						// Windows timeout path: SIGINT cannot be caught there, so
@@ -106,6 +115,14 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve_) => setTimeou
 					details: { tool: "kernel_run", timedOut },
 				};
 			} catch (err) {
+				if (_signal?.aborted) {
+					// Windows abort path: the kernel was killed (SIGINT cannot
+					// be caught there) and respawns on the next call.
+					return {
+						content: [{ type: "text", text: "kernel_run cancelled: the call was aborted; the kernel process was killed and will respawn fresh on the next call (session state is lost)." }],
+						details: { tool: "kernel_run", cancelled: true },
+					};
+				}
 				// Infrastructure failures (process died, RPC broken) are real
 				// tool errors; the next call auto-respawns the kernel.
 				throw new Error(`kernel_run failed: ${err instanceof Error ? err.message : String(err)}`);

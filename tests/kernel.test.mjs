@@ -314,6 +314,30 @@ await test("kernel: timeout reports TIMEOUT semantics on every platform", async 
 	}
 });
 
+await test("kernel: abort signal interrupts the running cell", async () => {
+	const wd = workspace();
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		const ac = new AbortController();
+		const p = k.execute("import time\ntime.sleep(30)", 10_000, ac.signal);
+		await new Promise((r) => setTimeout(r, 500));
+		ac.abort();
+		const r = await p;
+		assert.equal(r.timedOut, false, "abort is not a timeout");
+		if (process.platform === "win32") {
+			assert.equal(r.result, undefined, "Windows: abort kills and the call has no result");
+		} else {
+			assert.equal(r.result.interrupted, true, "POSIX: abort delivers SIGINT and the cell reports interrupted");
+		}
+		// the kernel is still serviceable afterwards (respawned on Windows)
+		const again = await k.execute("x = 1");
+		assert.deepEqual(again.result.new, [{ name: "x", type: "int" }]);
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
+
 await test("kernel: crash of user code does not kill process", async () => {
 	const wd = workspace();
 	const k = new KernelProcess({ serverPath, cwd: wd });

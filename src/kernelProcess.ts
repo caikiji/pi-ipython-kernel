@@ -32,6 +32,13 @@ export interface ExecuteResult {
 	reload?: ReloadReport;
 }
 
+/** Minimal structural type for AbortSignal (no @types/node dependency). */
+export interface Abortable {
+	readonly aborted: boolean;
+	addEventListener(type: "abort", listener: () => void, opts?: { once?: boolean }): void;
+	removeEventListener(type: "abort", listener: () => void): void;
+}
+
 export class KernelProcess {
 	private proc?: ChildProcess;
 	private client?: JsonRpcClient;
@@ -94,21 +101,26 @@ export class KernelProcess {
 			: null;
 	}
 
+
 	/** Execute code with interrupt-on-timeout semantics. Concurrent calls
 	 * are serialized: the kernel executes one cell at a time, and the
-	 * timeout clock starts when execution actually begins. */
-	async execute(code: string, timeoutMs = 30_000): Promise<{ timedOut: boolean; result?: ExecuteResult }> {
+	 * timeout clock starts when execution actually begins.
+	 *
+	 * When `signal` aborts (e.g. the harness cancelled the tool call), the
+	 * running cell is interrupted exactly like a timeout: SIGINT on POSIX,
+	 * kill + respawn on Windows. */
+	async execute(code: string, timeoutMs = 30_000, signal?: Abortable): Promise<{ timedOut: boolean; result?: ExecuteResult }> {
 		// Register on the queue synchronously (call order = execution order);
 		// ensureStarted runs inside the slot, so spawn waits are serialized
 		// too and the timeout clock starts when the cell actually begins.
 		const run = this.executeQueue.then(async () => {
 			await this.ensureStarted();
+			if (signal?.aborted) return { timedOut: false, result: undefined };
 			// Set when the timeout fired: distinguishes "killed because the
 			// cell did not finish in time" from a plain crash below (both
 			// reject the call, but only the former is a TIMEOUT outcome).
 			let timedOutArmed = false;
-			const onTimeout = () => {
-				timedOutArmed = true;
+			const interrupt = () => {
 				// SIGINT raises KeyboardInterrupt inside exec on POSIX; on
 				// Windows it cannot be caught, so fall back to kill + respawn.
 				if (process.platform === "win32") {
@@ -117,6 +129,12 @@ export class KernelProcess {
 					this.proc?.kill("SIGINT");
 				}
 			};
+			const onTimeout = () => {
+				timedOutArmed = true;
+				interrupt();
+			};
+			const onAbort = () => interrupt();
+			signal?.addEventListener("abort", onAbort, { once: true });
 			try {
 				const res = (await this.client!.call("execute", { code }, { timeoutMs, onTimeout } satisfies CallOptions)) as {
 					timedOut: boolean;
@@ -135,6 +153,8 @@ export class KernelProcess {
 					return { timedOut: true, result: undefined };
 				}
 				throw err;
+			} finally {
+				signal?.removeEventListener("abort", onAbort);
 			}
 		});
 		// A failed cell must not poison the queue for later calls.
