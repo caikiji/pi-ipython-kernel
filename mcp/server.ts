@@ -79,7 +79,17 @@ const tools = [
 			const timeoutSec = Math.min(Math.max(Number(args.timeout ?? 30) || 30, 1), 300);
 			const { proc, stages } = await kernel();
 			const { timedOut, result } = await proc.execute(code, timeoutSec * 1000);
-			if (!result) throw new Error("kernel returned no result");
+			if (!result) {
+				if (timedOut) {
+					// Windows timeout path: the kernel was killed (SIGINT
+					// cannot be caught there) and will respawn on the next
+					// call. Report TIMEOUT semantics, not an error.
+					return {
+						content: text(session.warningText() + "TIMEOUT: the code did not finish within the timeout; the kernel process was killed and will respawn fresh on the next call (session state is lost)."),
+					};
+				}
+				throw new Error("kernel returned no result");
+			}
 			const prefix = stages.length > 0 ? stages.map(stageText).join("\n") + "\n\n" : "";
 			return { content: text(prefix + session.warningText() + formatExecuteResult(result, timedOut)) };
 		},

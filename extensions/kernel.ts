@@ -84,6 +84,21 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve_) => setTimeou
 			try {
 				const { timedOut, result } = await proc.execute(code, timeoutSec * 1000);
 				if (!result) {
+					if (timedOut) {
+						// Windows timeout path: SIGINT cannot be caught there, so
+						// the kernel was killed (session state is lost) and the
+						// next call respawns a fresh one. Report the TIMEOUT
+						// semantics instead of an infrastructure error.
+						return {
+							content: [
+								{
+									type: "text",
+									text: session.warningText() + "TIMEOUT: the code did not finish within the timeout; the kernel process was killed and will respawn fresh on the next call (session state is lost).",
+								},
+							],
+							details: { tool: "kernel_run", timedOut: true },
+						};
+					}
 					throw new Error("kernel returned no result");
 				}
 				return {

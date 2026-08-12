@@ -6,7 +6,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import type { ReloadReport } from "./format.ts";
-import { JsonRpcClient, TimeoutError, type CallOptions } from "./rpc.ts";
+import { JsonRpcClient, ProcessKilledError, TimeoutError, type CallOptions } from "./rpc.ts";
 
 export interface KernelProcessOptions {
 	/** Absolute path to python/server.py. */
@@ -103,7 +103,12 @@ export class KernelProcess {
 		// too and the timeout clock starts when the cell actually begins.
 		const run = this.executeQueue.then(async () => {
 			await this.ensureStarted();
+			// Set when the timeout fired: distinguishes "killed because the
+			// cell did not finish in time" from a plain crash below (both
+			// reject the call, but only the former is a TIMEOUT outcome).
+			let timedOutArmed = false;
 			const onTimeout = () => {
+				timedOutArmed = true;
 				// SIGINT raises KeyboardInterrupt inside exec on POSIX; on
 				// Windows it cannot be caught, so fall back to kill + respawn.
 				if (process.platform === "win32") {
@@ -119,8 +124,15 @@ export class KernelProcess {
 				};
 				return res;
 			} catch (err) {
-				if (err instanceof TimeoutError && process.platform === "win32") {
-					// killed above; next call respawns via ensureStarted
+				// On Windows onTimeout kills the process (SIGINT cannot be
+				// caught there), so the pending call rejects with
+				// ProcessKilledError (exit event) or TimeoutError (grace
+				// expired) instead of an interrupted result. Both mean "the
+				// cell did not finish in time" — surface TIMEOUT semantics
+				// rather than an infrastructure error so the agent can act
+				// on it. The next call respawns via ensureStarted.
+				if (timedOutArmed && (err instanceof TimeoutError || err instanceof ProcessKilledError)) {
+					return { timedOut: true, result: undefined };
 				}
 				throw err;
 			}
