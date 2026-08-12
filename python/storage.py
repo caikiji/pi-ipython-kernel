@@ -127,30 +127,43 @@ def check_type(obj: Any) -> str:
 
 # ---------------------------------------------------------------------------
 # JSON codec with type tags (recursive; the base format)
+# ---------------------------------------------------------------------------
+
+# Type-tag key for encoded special values. The old key ("__type__") could
+# collide with a user dict's own key and silently misinterpret it on load;
+# the namespaced key below makes that practically impossible. Legacy blobs
+# written with the old key still decode, and user dicts carrying the old
+# key are escaped on encode and restored on decode.
+_TYPE_TAG = "$pi$type"
+_LEGACY_TYPE_TAG = "__type__"
+_ESCAPED_LEGACY = "$pi$escaped$__type__"
 
 
 def _encode_json(v: Any) -> Any:
     if v is None or isinstance(v, (bool, int, float, str)):
         return v
     if isinstance(v, bytes):
-        return {"__type__": "bytes", "data": base64.b64encode(v).decode("ascii")}
+        return {_TYPE_TAG: "bytes", "data": base64.b64encode(v).decode("ascii")}
     if isinstance(v, datetime.datetime):
-        return {"__type__": "datetime", "value": v.isoformat()}
+        return {_TYPE_TAG: "datetime", "value": v.isoformat()}
     if _NUMPY is not None and isinstance(v, _NUMPY.generic):
-        return {"__type__": "numpy_scalar", "kind": v.dtype.kind, "value": v.item()}
+        return {_TYPE_TAG: "numpy_scalar", "kind": v.dtype.kind, "value": v.item()}
     if isinstance(v, list):
         return [_encode_json(x) for x in v]
     if isinstance(v, dict):
         for k in v:
             if not isinstance(k, str):
                 raise PublishError(f"dict keys must be str (found {type(k).__name__} key)")
-        return {k: _encode_json(x) for k, x in v.items()}
+        return {
+            (_ESCAPED_LEGACY if k == _LEGACY_TYPE_TAG else k): _encode_json(x)
+            for k, x in v.items()
+        }
     raise PublishError(f"cannot JSON-encode {type(v).__name__} nested value")
 
 
 def _decode_json(v: Any) -> Any:
-    if isinstance(v, dict) and "__type__" in v:
-        tag = v["__type__"]
+    if isinstance(v, dict):
+        tag = v.get(_TYPE_TAG, v.get(_LEGACY_TYPE_TAG))
         if tag == "bytes":
             return base64.b64decode(v["data"])
         if tag == "datetime":
@@ -164,11 +177,14 @@ def _decode_json(v: Any) -> Any:
             if kind == "b":
                 return bool(v["value"])
             return int(v["value"])
+        if tag is None:
+            return {
+                (_LEGACY_TYPE_TAG if k == _ESCAPED_LEGACY else k): _decode_json(x)
+                for k, x in v.items()
+            }
         return v
     if isinstance(v, list):
         return [_decode_json(x) for x in v]
-    if isinstance(v, dict):
-        return {k: _decode_json(x) for k, x in v.items()}
     return v
 
 

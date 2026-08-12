@@ -109,6 +109,35 @@ class SerializeTest(unittest.TestCase):
         with self.assertRaises(PublishError):
             storage.serialize({1: "x"})
 
+    def test_user_dict_with_type_tag_key_survives_roundtrip(self):
+        # a user dict carrying the legacy tag key must not be silently
+        # reinterpreted as a tagged value on load
+        obj = {"__type__": "bytes", "data": "hello", "n": 1}
+        back = self.roundtrip(obj)
+        self.assertEqual(back, obj)
+        self.assertIsInstance(back, dict)
+
+    def test_nested_type_tag_key_survives_roundtrip(self):
+        obj = {"a": {"__type__": "datetime"}, "b": [{"__type__": "bytes"}]}
+        back = self.roundtrip(obj)
+        self.assertEqual(back, obj)
+
+    def test_legacy_blobs_still_decode(self):
+        # blobs written before the tag namespacing keep loading
+        self.assertEqual(storage.deserialize("json", b'{"__type__": "bytes", "data": "aGk="}'), b"hi")
+        import datetime
+
+        self.assertEqual(
+            storage.deserialize("json", b'{"__type__": "datetime", "value": "2026-01-01T12:30:00"}'),
+            datetime.datetime(2026, 1, 1, 12, 30),
+        )
+
+    def test_namespaced_tags_roundtrip(self):
+        self.assertEqual(self.roundtrip(b"\x00\x01\xff"), b"\x00\x01\xff")
+        import datetime
+
+        self.assertEqual(self.roundtrip(datetime.datetime(2026, 1, 1)), datetime.datetime(2026, 1, 1))
+
 
 class GlobalStoreTest(unittest.TestCase):
     def setUp(self):
