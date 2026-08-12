@@ -418,7 +418,15 @@ await test("kernel: publish, ls, get full roundtrip", async () => {
 	const wd = workspace();
 	const k = new KernelProcess({ serverPath, cwd: wd });
 	try {
-		await k.execute("import pandas as pd\ndf = pd.DataFrame({'a': [1, 2], 'b': ['x', 'y']})");
+		// pandas is optional in CI/test environments; fall back to a plain
+		// dict so the global-layer roundtrip still runs everywhere.
+		const probe = await k.execute("import pandas as pd, io\npd.DataFrame({'a': [1]}).to_parquet(io.BytesIO())");
+		const hasPandas = !probe.result.error;
+		await k.execute(
+			hasPandas
+				? "import pandas as pd\ndf = pd.DataFrame({'a': [1, 2], 'b': ['x', 'y']})"
+				: "df = {'a': [1, 2], 'b': ['x', 'y']}",
+		);
 		const pub = await k.call("publish", { name: "df", description: "demo frame" });
 		assert.equal(pub.version, 1);
 		assert.equal(pub.overwritten, false);
@@ -431,10 +439,10 @@ await test("kernel: publish, ls, get full roundtrip", async () => {
 		assert.equal(got.scope, "global");
 		assert.equal(got.loaded, true);
 		assert.equal(got.covered_session, true);
-		assert.match(got.summary, /DataFrame shape=\(2, 2\)/);
+		assert.match(got.summary, hasPandas ? /DataFrame shape=\(2, 2\)/ : /dict len=2/);
 		// loaded object usable in the session
-		const run = await k.execute("df.shape");
-		assert.match(run.result.output, /\(2, 2\)/);
+		const run = await k.execute(hasPandas ? "df.shape" : "len(df)");
+		assert.match(run.result.output, hasPandas ? /\(2, 2\)/ : /2/);
 	} finally {
 		await k.shutdown();
 		rmSync(wd, { recursive: true, force: true });
@@ -728,6 +736,10 @@ await test("kernel session: cwd change rebuilds and kills the old kernel", async
 
 await test("kernel session: fallback warning reported once", async () => {
 	const wd = workspace();
+	// The fallback path only triggers without an explicit interpreter
+	// override; isolate the test from the caller's environment.
+	const savedPython = process.env.PI_KERNEL_PYTHON;
+	delete process.env.PI_KERNEL_PYTHON;
 	const session = new KernelSession({ serverPath, manifestPath: resolve(wd, "no-manifest.json") });
 	try {
 		await session.get(wd);
@@ -735,6 +747,7 @@ await test("kernel session: fallback warning reported once", async () => {
 		assert.equal(session.warningText(), "", "warning is shown exactly once");
 	} finally {
 		await session.shutdown();
+		if (savedPython !== undefined) process.env.PI_KERNEL_PYTHON = savedPython;
 		rmSync(wd, { recursive: true, force: true });
 	}
 });

@@ -176,6 +176,16 @@ export class KernelProcess {
 					this.consecutiveTimeouts++;
 					return { timedOut: true, result: undefined };
 				}
+				if (signal?.aborted && (err instanceof TimeoutError || err instanceof ProcessKilledError)) {
+					// Aborted while the cell was running: on Windows the
+					// abort kills the process (SIGINT cannot be caught), on
+					// POSIX an unresponsive cell ends in TimeoutError. Both
+					// are the cancel itself — surface it as a result, not
+					// an infrastructure error. The kernel respawns on the
+					// next call.
+					this.consecutiveTimeouts = 0;
+					return { timedOut: false, result: undefined };
+				}
 				// Any other failure (spawn error, plain crash) means a fresh
 				// kernel is coming: start the escalation count from zero.
 				this.consecutiveTimeouts = 0;
