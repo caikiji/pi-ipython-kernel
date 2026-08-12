@@ -261,10 +261,13 @@ def deserialize(format_name: str, blob: bytes, expected_type: str | None = None)
 # ---------------------------------------------------------------------------
 # SQLite store
 
+# Bumped whenever the objects table schema changes; migrations run in
+# _migrate() in order (see PRAGMA user_version).
+SCHEMA_VERSION = 1
+
 
 class GlobalStore:
     """The workspace-global object store: one SQLite database, WAL mode.
-
     All reads go directly to SQLite (always fresh); all writes happen in
     a single transaction (data + metadata committed atomically).
     """
@@ -276,6 +279,7 @@ class GlobalStore:
         self.conn = sqlite3.connect(self.db_path, timeout=10)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=5000")
+        self._migrate()
         self.conn.execute(
             """CREATE TABLE IF NOT EXISTS objects (
                 name        TEXT PRIMARY KEY,
@@ -290,6 +294,24 @@ class GlobalStore:
                 created_at  TEXT NOT NULL
             )"""
         )
+        self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Version-guard the schema via PRAGMA user_version. A database
+        created by a newer extension version is refused with a clear error
+        instead of failing later with an opaque column error; older
+        databases are upgraded in order (none needed yet: the initial
+        schema is v1 and created by CREATE TABLE IF NOT EXISTS above)."""
+        row = self.conn.execute("PRAGMA user_version").fetchone()
+        current = row[0] if row else 0
+        if current > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"store schema v{current} is newer than this extension supports (v{SCHEMA_VERSION}); update the extension"
+            )
+        while current < SCHEMA_VERSION:
+            current += 1
+            # future migrations: if current == N: <migrate to N>
+            self.conn.execute(f"PRAGMA user_version = {current}")
         self.conn.commit()
 
     def publish(

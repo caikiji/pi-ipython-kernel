@@ -199,6 +199,16 @@ class GlobalStoreTest(unittest.TestCase):
         with self.assertRaises(PublishError):
             self.store.load("data")
 
+    def test_schema_version_recorded(self):
+        row = self.store.conn.execute("PRAGMA user_version").fetchone()
+        self.assertEqual(row[0], storage.SCHEMA_VERSION)
+
+    def test_newer_schema_rejected(self):
+        self.store.conn.execute("PRAGMA user_version = 999")
+        self.store.conn.commit()
+        with self.assertRaises(RuntimeError):
+            GlobalStore(self.wd)
+
     def test_list_objects_with_pattern(self):
         self.store.publish("df_a", 1, description="d")
         self.store.publish("df_b", 2, description="d")
