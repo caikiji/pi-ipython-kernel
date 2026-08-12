@@ -18,6 +18,7 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KernelSession } from "../src/kernelSession.ts";
+import type { Abortable } from "../src/kernelProcess.ts";
 import { McpProtocol, runStdio } from "../src/mcp.ts";
 import {
 	formatDelete,
@@ -74,12 +75,20 @@ const tools = [
 			},
 			required: ["code"],
 		},
-		async handler(args: Record<string, unknown>) {
+		async handler(args: Record<string, unknown>, signal?: Abortable) {
 			const code = String(args.code ?? "");
 			const timeoutSec = Math.min(Math.max(Number(args.timeout ?? 30) || 30, 1), 300);
 			const { proc, stages } = await kernel();
-			const { timedOut, result } = await proc.execute(code, timeoutSec * 1000);
+			const { timedOut, result } = await proc.execute(code, timeoutSec * 1000, signal);
 			if (!result) {
+				if (signal?.aborted) {
+					// The client cancelled this call; the running cell was
+					// interrupted (SIGINT) or, on Windows, the kernel was
+					// killed (respawns on the next call).
+					return {
+						content: text(session.warningText() + "kernel_run cancelled: the call was cancelled; the running cell was interrupted."),
+					};
+				}
 				if (timedOut) {
 					// Windows timeout path: the kernel was killed (SIGINT
 					// cannot be caught there) and will respawn on the next

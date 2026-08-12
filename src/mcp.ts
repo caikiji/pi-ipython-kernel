@@ -9,6 +9,7 @@
  *
  * Pure Node: no pi imports, testable directly.
  */
+import type { Abortable } from "./kernelProcess.ts";
 
 export interface McpContent {
 	type: "text";
@@ -19,7 +20,10 @@ export interface McpTool {
 	name: string;
 	description?: string;
 	inputSchema: Record<string, unknown>;
-	handler: (args: Record<string, unknown>) => Promise<{ content: McpContent[]; isError?: boolean }>;
+	/** `signal` aborts when the client sends notifications/cancelled for
+	 * this request (MCP 2025-03-26); handlers should interrupt long work
+	 * (kernel_run passes it to the kernel execute path). */
+	handler: (args: Record<string, unknown>, signal?: Abortable) => Promise<{ content: McpContent[]; isError?: boolean }>;
 }
 
 export interface McpResource {
@@ -95,7 +99,8 @@ export class McpProtocol {
 	private serverInfo: { name: string; version: string };
 	private negotiatedVersion = "2024-11-05";
 	private initialized = false;
-
+	/** In-flight tools/call requests, so notifications/cancelled can abort them. */
+	private active = new Map<unknown, AbortController>();
 	constructor(opts: McpServerOptions) {
 		this.tools = new Map(opts.tools.map((t) => [t.name, t]));
 		this.resources = opts.resources ?? [];
@@ -155,14 +160,22 @@ export class McpProtocol {
 					if (typeof args !== "object" || args === null) {
 						return errorResponse(req.id, ERR_INVALID_REQUEST, "tool arguments must be an object");
 					}
+					// Track the in-flight call so notifications/cancelled
+					// can abort it; the handler gets the signal and should
+					// interrupt long work (kernel_run passes it through to
+					// the kernel execute path).
+					const controller = new AbortController();
+					this.active.set(req.id, controller);
 					try {
-						const result = await tool.handler(args);
+						const result = await tool.handler(args, controller.signal);
 						return successResponse(req.id, result);
 					} catch (err) {
 						return successResponse(req.id, {
 							content: [{ type: "text", text: `tool error: ${err instanceof Error ? err.message : String(err)}` }],
 							isError: true,
 						});
+					} finally {
+						this.active.delete(req.id);
 					}
 				}
 				case "resources/list":
@@ -187,7 +200,17 @@ export class McpProtocol {
 						contents: [{ uri, mimeType: res.mimeType ?? "text/plain", text }],
 					});
 				}
+				case "notifications/cancelled": {
+					// MCP 2025-03-26: the client aborts an in-flight request.
+					// Abort its controller; the handler interrupts the kernel
+					// like a pi-side tool cancel.
+					const rid = (params as { requestId?: unknown }).requestId;
+					if (rid !== undefined) this.active.get(rid)?.abort();
+					return undefined; // notification: never respond
+				}
 				default:
+					// JSON-RPC notifications never receive a response.
+					if (isNotification) return undefined;
 					return errorResponse(req.id, ERR_METHOD_NOT_FOUND, `method not found: ${method}`);
 			}
 		} catch (err) {

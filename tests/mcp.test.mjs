@@ -65,15 +65,26 @@ const makeProtocol = () =>
 				inputSchema: { type: "object", properties: { s: { type: "string" } } },
 				handler: async (args) => ({ content: [{ type: "text", text: String(args.s ?? "") }] }),
 			},
-			{
-				name: "boom",
-				inputSchema: {},
-				handler: async () => {
-					throw new Error("kaboom");
-				},
+		{
+			name: "slow",
+			inputSchema: {},
+			handler: async (_args, signal) => {
+				// resolve only when cancelled (tests always cancel it)
+				await new Promise((resolve_) => {
+					signal?.addEventListener("abort", resolve_, { once: true });
+				});
+				return { content: [{ type: "text", text: "aborted" }] };
 			},
-		],
-		resources: [
+		},
+		{
+			name: "boom",
+			inputSchema: {},
+			handler: async () => {
+				throw new Error("kaboom");
+			},
+		},
+	],
+	resources: [
 			{
 				uri: "kernel://registry",
 				name: "registry",
@@ -106,7 +117,7 @@ await test("mcp: tools/list and tools/call", async () => {
 	const p = makeProtocol();
 	await p.handle({ jsonrpc: "2.0", id: 0, method: "initialize", params: {} });
 	const list = await p.handle({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
-	assert.deepEqual(list.result.tools.map((t) => t.name), ["echo", "boom"]);
+	assert.deepEqual(list.result.tools.map((t) => t.name), ["echo", "slow", "boom"]);
 	const call = await p.handle({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "echo", arguments: { s: "hi" } } });
 	assert.equal(call.result.content[0].text, "hi");
 	assert.equal(call.result.isError, undefined);
@@ -128,6 +139,31 @@ await test("mcp: resources list/read and notifications", async () => {
 	// notifications produce no response
 	const note = await p.handle({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
 	assert.equal(note, undefined);
+});
+
+await test("mcp: notifications/cancelled aborts an in-flight tool call", async () => {
+	const p = makeProtocol();
+	await p.handle({ jsonrpc: "2.0", id: 0, method: "initialize", params: {} });
+	const call = p.handle({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "slow", arguments: {} } });
+	// let the handler start, then cancel it
+	await new Promise((r) => setTimeout(r, 50));
+	const note = await p.handle({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 7 } });
+	assert.equal(note, undefined, "notifications never get a response");
+	const res = await Promise.race([
+		call,
+		new Promise((_, rej) => setTimeout(() => rej(new Error("slow tool was never aborted")), 2_000)),
+	]);
+	assert.equal(res.result.content[0].text, "aborted");
+	// cancelling an unknown request is a no-op, still no response
+	const note2 = await p.handle({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 999 } });
+	assert.equal(note2, undefined);
+});
+
+await test("mcp: unknown notifications get no response", async () => {
+	const p = makeProtocol();
+	await p.handle({ jsonrpc: "2.0", id: 0, method: "initialize", params: {} });
+	const r = await p.handle({ jsonrpc: "2.0", method: "notifications/whatever", params: {} });
+	assert.equal(r, undefined);
 });
 
 // ------------------------------------------------------------ end-to-end
