@@ -338,6 +338,37 @@ await test("kernel: abort signal interrupts the running cell", async () => {
 	}
 });
 
+await test("kernel: unresponsive kernel escalates from SIGINT to kill", async () => {
+	const wd = workspace();
+	const k = new KernelProcess({ serverPath, cwd: wd });
+	try {
+		// A cell that ignores SIGINT cannot be interrupted: the first
+		// timeout ends without a response (TimeoutError after grace) and
+		// the second escalates to kill + respawn instead of stalling
+		// every later call forever.
+		const code = "import signal\nsignal.signal(signal.SIGINT, signal.SIG_IGN)\nimport time\ntime.sleep(30)";
+		const r1 = await k.execute(code, 600);
+		assert.equal(r1.timedOut, true);
+		assert.equal(r1.result, undefined, "SIGINT was ignored: no interrupted result");
+		if (process.platform !== "win32") {
+			// Windows kills on the first timeout by design; on POSIX the
+			// first timeout only SIGINTs, so the kernel must still be up.
+			assert.equal(k.running, true, "first timeout SIGINTs without killing");
+		}
+		const r2 = await k.execute(code, 600);
+		assert.equal(r2.timedOut, true);
+		assert.equal(r2.result, undefined);
+		if (process.platform !== "win32") {
+			assert.equal(k.running, false, "second unresponsive timeout escalates to kill");
+		}
+		// a fresh kernel (auto-respawned) serves normally
+		const ok = await k.execute("x = 1");
+		assert.deepEqual(ok.result.new, [{ name: "x", type: "int" }]);
+	} finally {
+		await k.shutdown();
+		rmSync(wd, { recursive: true, force: true });
+	}
+});
 await test("kernel: crash of user code does not kill process", async () => {
 	const wd = workspace();
 	const k = new KernelProcess({ serverPath, cwd: wd });

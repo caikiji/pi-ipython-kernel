@@ -46,7 +46,9 @@ export class KernelProcess {
 	private opts: KernelProcessOptions;
 	private helloInit: { path?: string; error?: string; registered: string[] } | null = null;
 	private executeQueue: Promise<unknown> = Promise.resolve();
-
+	/** Consecutive timeouts that ended with no response at all (kernel
+	 * wedged, SIGINT ineffective). Drives the SIGINT -> kill escalation. */
+	private consecutiveTimeouts = 0;
 	constructor(opts: KernelProcessOptions) {
 		this.opts = opts;
 	}
@@ -123,7 +125,10 @@ export class KernelProcess {
 			const interrupt = () => {
 				// SIGINT raises KeyboardInterrupt inside exec on POSIX; on
 				// Windows it cannot be caught, so fall back to kill + respawn.
-				if (process.platform === "win32") {
+				// A cell that ignores SIGINT (C extensions, masked signals)
+				// escalates to the same kill after one unresponsive timeout,
+				// so a wedged kernel can never stall every later call forever.
+				if (process.platform === "win32" || this.consecutiveTimeouts > 0) {
 					this.killSync();
 				} else {
 					this.proc?.kill("SIGINT");
@@ -140,6 +145,14 @@ export class KernelProcess {
 					timedOut: boolean;
 					result?: ExecuteResult;
 				};
+				// A response that arrived (even an interrupted one) proves
+				// the kernel is healthy: reset the escalation counter. Only
+				// timeouts with no response at all keep it.
+				if (res.timedOut && !res.result) {
+					this.consecutiveTimeouts++;
+				} else {
+					this.consecutiveTimeouts = 0;
+				}
 				return res;
 			} catch (err) {
 				// On Windows onTimeout kills the process (SIGINT cannot be
@@ -150,8 +163,12 @@ export class KernelProcess {
 				// rather than an infrastructure error so the agent can act
 				// on it. The next call respawns via ensureStarted.
 				if (timedOutArmed && (err instanceof TimeoutError || err instanceof ProcessKilledError)) {
+					this.consecutiveTimeouts++;
 					return { timedOut: true, result: undefined };
 				}
+				// Any other failure (spawn error, plain crash) means a fresh
+				// kernel is coming: start the escalation count from zero.
+				this.consecutiveTimeouts = 0;
 				throw err;
 			} finally {
 				signal?.removeEventListener("abort", onAbort);
